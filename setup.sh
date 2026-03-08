@@ -17,7 +17,7 @@ apt update
 apt install deconz-headless -y
 
 # 3. deCONZ auf Port 8080 verschieben
-sed -i 's/--http-port=80/--http-port=8080/g' /lib/systemd/system/deconz.service
+sed -i -E 's/--http-port=[0-9]+/--http-port=8080/g' /lib/systemd/system/deconz.service
 
 # 4. Python-Umgebung einrichten
 apt install python3-websocket python3-requests python3-flask -y
