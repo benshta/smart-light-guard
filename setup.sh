@@ -82,7 +82,7 @@ EOF
 # 7. Setup abschließen
 # ==============================================================================
 systemctl daemon-reload
-systemctl enable deconz slg-dashboard slg-monitor slg-cloud-sync
+systemctl enable deconz-headless slg-dashboard slg-monitor slg-cloud-sync
 
 echo "✅ System-Setup erfolgreich!"
 echo "🔄 Das System startet in 5 Sekunden neu..."
