@@ -28,6 +28,26 @@ def save_settings(data):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+def get_zigbee_devices():
+    devices = []
+    try:
+        # Sensoren abrufen (Bewegung, Taster etc.)
+        r_sens = requests.get(f"{DECONZ_HOST}/api/{API_KEY}/sensors", timeout=2)
+        if r_sens.status_code == 200:
+            for sid, data in r_sens.json().items():
+                # Den virtuellen Tageslicht-Sensor von deCONZ ausblenden
+                if data.get("type") != "Daylight":
+                    devices.append({"name": data.get("name"), "type": "Sensor"})
+        
+        # Lampen/Steckdosen abrufen
+        r_lights = requests.get(f"{DECONZ_HOST}/api/{API_KEY}/lights", timeout=2)
+        if r_lights.status_code == 200:
+            for lid, data in r_lights.json().items():
+                devices.append({"name": data.get("name"), "type": "Lampe / Aktor"})
+    except:
+        pass
+    return devices
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -35,49 +55,86 @@ HTML_TEMPLATE = """
     <title>Smart Light Guard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
+        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
         .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 450px; margin: 0 auto 20px auto; }
         h1 { text-align: center; color: #007bff; }
-        label { display: block; margin-top: 15px; font-weight: bold; }
+        label { display: block; margin-top: 15px; font-weight: bold; font-size: 0.9em; color: #555; }
         input, select { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
-        button { background: #007bff; color: white; border: none; padding: 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: bold; }
-        button.pair { background: #28a745; margin-bottom: 20px; }
-        .status-box { background: #e7f3ff; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #b3d7ff; }
+        button { background: #007bff; color: white; border: none; padding: 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: bold; font-size: 16px; }
+        button.pair { background: #28a745; margin-bottom: 10px; }
+        .status-box { background: #e7f3ff; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #b3d7ff; margin-bottom: 20px; font-size: 1.1em; }
+        .alert-success { background: #d4edda; color: #155724; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; border: 1px solid #c3e6cb; }
+        .device-list { list-style: none; padding: 0; margin: 15px 0 0 0; }
+        .device-item { padding: 12px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .device-item:last-child { border-bottom: none; }
+        .device-type { color: #888; font-size: 0.8em; background: #f8f9fa; padding: 4px 8px; border-radius: 4px; }
     </style>
 </head>
 <body>
     <h1>🛡️ Smart Light Guard</h1>
+    
+    {% if pairing_active %}
+    <div class="alert-success">
+        <strong>⏳ Pairing-Modus aktiv!</strong><br><br>
+        Du hast nun 60 Sekunden Zeit, um neue Zigbee-Geräte einzuschalten. Lade die Seite danach neu, um sie in der Liste zu sehen.
+    </div>
+    {% endif %}
+
+    <div class="card status-box">Letzte registrierte Aktivität:<br><strong>{{ last_act_time }}</strong></div>
+
     <div class="card">
-        <form action="/pair" method="post"><button type="submit" class="pair">➕ Gerät koppeln (60s)</button></form>
-        <hr style="border:0; border-top:1px solid #eee; margin: 20px 0;">
+        <form action="/pair" method="post"><button type="submit" class="pair">➕ Neues Gerät anlernen</button></form>
+        
+        <h3 style="margin-top: 25px; margin-bottom: 5px;">📶 Verbundene Geräte</h3>
+        {% if devices %}
+            <ul class="device-list">
+            {% for dev in devices %}
+                <li class="device-item">
+                    <strong>{{ dev.name }}</strong>
+                    <span class="device-type">{{ dev.type }}</span>
+                </li>
+            {% endfor %}
+            </ul>
+        {% else %}
+            <p style="color: #888; text-align: center; margin-top: 15px;">Noch keine Geräte verbunden.</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h3 style="margin-top: 0;">⚙️ Einstellungen</h3>
         <form action="/save" method="post">
             <label>Inaktivitäts-Limit (Sekunden):</label>
             <input type="number" name="timeout_seconds" value="{{ settings.timeout_seconds }}" min="10">
             
             <label>Benachrichtigungs-Modus:</label>
             <select name="notification_mode">
-                <option value="all" {% if settings.notification_mode == 'all' %}selected{% endif %}>Alle gleichzeitig informieren</option>
+                <option value="all" {% if settings.notification_mode == 'all' %}selected{% endif %}>Alle gleichzeitig alarmieren</option>
                 <option value="sequential" {% if settings.notification_mode == 'sequential' %}selected{% endif %}>Nach Priorität eskalieren</option>
             </select>
 
-            <label>Notfall-Nummern (Komma getrennt für POC):</label>
+            <label>Notfall-Nummern (Komma getrennt):</label>
             <input type="text" name="contacts_raw" value="{{ contacts_str }}" placeholder="+4179..., +4178...">
             
-            <button type="submit">Speichern</button>
+            <button type="submit" style="margin-top: 15px;">Konfiguration speichern</button>
         </form>
     </div>
-    <div class="card status-box">Letzte Aktivität: <strong>{{ last_act_time }}</strong></div>
 </body>
 </html>
 """
 
 @app.route('/')
 def index():
+    pairing_active = request.args.get('pairing') == 'true'
     settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600, "notification_mode": "all", "contacts": []})
     state = load_json(STATE_FILE, {"last_activity": time.time()})
+    
     contacts_str = ", ".join([c["number"] for c in settings.get("contacts", [])])
     last_act = time.strftime('%H:%M:%S', time.localtime(state.get("last_activity", time.time())))
-    return render_template_string(HTML_TEMPLATE, settings=settings, contacts_str=contacts_str, last_act_time=last_act)
+    
+    # Hole Live-Daten von deCONZ
+    devices = get_zigbee_devices()
+    
+    return render_template_string(HTML_TEMPLATE, settings=settings, contacts_str=contacts_str, last_act_time=last_act, pairing_active=pairing_active, devices=devices)
 
 @app.route('/save', methods=['POST'])
 def save():
@@ -92,9 +149,11 @@ def save():
 @app.route('/pair', methods=['POST'])
 def pair():
     try:
+        # Befehl an deCONZ senden
         requests.put(f"{DECONZ_HOST}/api/{API_KEY}/config", json={"permitjoin": 60}, timeout=5)
     except: pass
-    return "Pairing aktiv (60s)! <a href='/'>Zurück</a>"
+    # Zurück zur Startseite leiten und den Banner aktivieren
+    return redirect('/?pairing=true')
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=80, threaded=True)
