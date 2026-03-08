@@ -11,7 +11,7 @@ apt update && apt upgrade -y
 apt install avahi-daemon git -y
 
 # 2. deCONZ (Phoscon) Gateway installieren
-wget -O - http://phoscon.de/apt/deconz.pub.key | gpg --dearmor -o /usr/share/keyrings/deconz-archive-keyring.gpg
+wget -qO - http://phoscon.de/apt/deconz.pub.key | gpg --dearmor --yes -o /usr/share/keyrings/deconz-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/deconz-archive-keyring.gpg] http://phoscon.de/apt/deconz bookworm main" | tee /etc/apt/sources.list.d/deconz.list
 apt update
 apt install deconz-headless -y
@@ -82,7 +82,11 @@ EOF
 # 7. Setup abschließen
 # ==============================================================================
 systemctl daemon-reload
-systemctl enable deconz-headless slg-dashboard slg-monitor slg-cloud-sync
+# Versuche beide Varianten für deCONZ (sicher ist sicher)
+systemctl enable deconz || systemctl enable deconz-headless
+
+# Deine eigenen Dienste aktivieren
+systemctl enable slg-dashboard slg-monitor slg-cloud-sync
 
 echo "✅ System-Setup erfolgreich!"
 echo "🔄 Das System startet in 5 Sekunden neu..."
