@@ -1,46 +1,43 @@
-import json
-import time
-import os
-import requests
-import logging
+import json, time, os, requests, sqlite3, subprocess
 from flask import Flask, render_template_string, request, redirect
 
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
+# Pfade
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
+DECONZ_DB = "/root/.local/share/dresden-elektronik/deCONZ/zll.db"
 DECONZ_HOST = "http://127.0.0.1:8080"
 
 app = Flask(__name__)
 
+def get_api_key_from_db():
+    """Extrahiert den API-Key direkt aus der deCONZ Datenbank (kein Klick nötig)"""
+    if not os.path.exists(DECONZ_DB): return None
+    try:
+        conn = sqlite3.connect(DECONZ_DB)
+        cur = conn.cursor()
+        # Suche nach einem API-Key in der auth Tabelle
+        cur.execute("SELECT apikey FROM auth LIMIT 1")
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except: return None
+
 def load_json(filepath, default):
     if os.path.exists(filepath):
         try:
-            with open(filepath, "r") as f:
-                return json.load(f)
+            with open(filepath, "r") as f: return json.load(f)
         except: pass
     return default
-
-def save_settings(data):
-    data["updated_at"] = time.time()
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
 
 def get_zigbee_devices(api_key):
     devices = []
     if not api_key: return devices
     try:
-        r_sens = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=2)
-        if r_sens.status_code == 200:
-            for sid, data in r_sens.json().items():
-                if data.get("type") != "Daylight":
+        r = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=2)
+        if r.status_code == 200:
+            for sid, data in r.json().items():
+                if data.get("type") not in ["Daylight", "ZHASwitch"]:
                     devices.append({"name": data.get("name"), "type": "Sensor"})
-        
-        r_lights = requests.get(f"{DECONZ_HOST}/api/{api_key}/lights", timeout=2)
-        if r_lights.status_code == 200:
-            for lid, data in r_lights.json().items():
-                devices.append({"name": data.get("name"), "type": "Lampe / Aktor"})
     except: pass
     return devices
 
@@ -51,83 +48,41 @@ HTML_TEMPLATE = """
     <title>Smart Light Guard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; color: #1c1e21; }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 450px; margin: 0 auto 20px auto; }
-        h1 { text-align: center; color: #007bff; }
-        label { display: block; margin-top: 15px; font-weight: bold; font-size: 0.9em; color: #555; }
-        input, select { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
-        button { background: #007bff; color: white; border: none; padding: 14px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: bold; font-size: 16px; margin-bottom: 10px; }
-        button.pair { background: #28a745; }
-        button.phoscon { background: #6c757d; }
-        .status-box { background: #e7f3ff; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #b3d7ff; margin-bottom: 20px; font-size: 1.1em; }
-        .alert-success { background: #d4edda; color: #155724; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; border: 1px solid #c3e6cb; }
-        .alert-warning { background: #fff3cd; color: #856404; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ffeeba; }
-        .device-list { list-style: none; padding: 0; margin: 15px 0 0 0; }
-        .device-item { padding: 12px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
-        .device-type { color: #888; font-size: 0.8em; background: #f8f9fa; padding: 4px 8px; border-radius: 4px; }
+        body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; margin: 0 auto 15px auto; }
+        button { width: 100%; padding: 12px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        .btn-pair { background: #28a745; color: white; }
+        .btn-save { background: #007bff; color: white; }
+        .btn-danger { background: #dc3545; color: white; font-size: 0.8em; margin-top: 30px; }
+        input, select { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        .device-item { padding: 10px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
     </style>
 </head>
 <body>
-    <h1>🛡️ Smart Light Guard</h1>
-    
-    {% if msg == 'apikey_success' %}
-        <div class="alert-success">✅ API-Key erfolgreich generiert! Das System ist verbunden.</div>
-    {% elif msg == 'apikey_failed' %}
-        <div class="alert-warning">❌ Fehler: Hast du in Phoscon auf "App verbinden" geklickt?</div>
-    {% endif %}
-
-    {% if not api_key %}
-    <div class="alert-warning">
-        <strong>⚠️ Gateway nicht verbunden</strong><br><br>
-        1. Öffne die <a href="http://{{ request.host.split(':')[0] }}:8080/pwa/index.html" target="_blank">Phoscon App</a><br>
-        2. Gehe zu Einstellungen -> Gateway -> Erweitert<br>
-        3. Klicke auf <b>App verbinden</b><br>
-        4. Kehre sofort hierher zurück und klicke diesen Button:
-        <form action="/fetch_api_key" method="post" style="margin-top: 15px;">
-            <button type="submit">🔑 API-Key anfordern</button>
-        </form>
-    </div>
-    {% endif %}
-
-    {% if pairing_active %}
-    <div class="alert-success">
-        <strong>⏳ Pairing-Modus aktiv!</strong><br>Gerät jetzt einschalten/Reset drücken.
-    </div>
-    {% endif %}
-
-    <div class="card status-box">Letzte registrierte Aktivität:<br><strong>{{ last_act_time }}</strong></div>
-
     <div class="card">
-        {% if api_key %}
-            <form action="/pair" method="post"><button type="submit" class="pair">➕ Neues Gerät anlernen (60s)</button></form>
-        {% endif %}
-        <button class="phoscon" onclick="window.open('http://{{ request.host.split(':')[0] }}:8080/pwa/index.html', '_blank')">⚙️ Geräteverwaltung (Phoscon)</button>
+        <h2 style="text-align:center; color:#007bff;">🛡️ Smart Light Guard</h2>
+        <p style="text-align:center;">Status: <strong>Verbunden</strong></p>
         
-        <h3 style="margin-top: 25px;">📶 Verbundene Geräte</h3>
-        {% if devices %}
-            <ul class="device-list">
-            {% for dev in devices %}
-                <li class="device-item"><strong>{{ dev.name }}</strong><span class="device-type">{{ dev.type }}</span></li>
-            {% endfor %}
-            </ul>
-        {% else %}
-            <p style="color: #888; text-align: center; margin-top: 15px;">{% if api_key %}Keine Geräte gefunden.{% else %}Warte auf API-Key...{% endif %}</p>
-        {% endif %}
+        <form action="/pair" method="post"><button type="submit" class="btn-pair">➕ Gerät jetzt anlernen (60s)</button></form>
+        
+        <h3>📶 Geräte</h3>
+        {% for dev in devices %}
+            <div class="device-item"><span>{{ dev.name }}</span> <small>{{ dev.type }}</small></div>
+        {% endfor %}
     </div>
 
     <div class="card">
-        <h3 style="margin-top: 0;">⚙️ Einstellungen</h3>
+        <h3>⚙️ Einstellungen</h3>
         <form action="/save" method="post">
-            <label>Inaktivitäts-Limit (Sekunden):</label>
-            <input type="number" name="timeout_seconds" value="{{ settings.timeout_seconds }}" min="10">
-            <label>Benachrichtigungs-Modus:</label>
-            <select name="notification_mode">
-                <option value="all" {% if settings.notification_mode == 'all' %}selected{% endif %}>Alle gleichzeitig alarmieren</option>
-                <option value="sequential" {% if settings.notification_mode == 'sequential' %}selected{% endif %}>Nach Priorität eskalieren</option>
-            </select>
-            <label>Notfall-Nummern (Komma getrennt):</label>
+            <label>Limit (Sekunden):</label>
+            <input type="number" name="timeout_seconds" value="{{ settings.timeout_seconds }}">
+            <label>Nummern:</label>
             <input type="text" name="contacts_raw" value="{{ contacts_str }}">
-            <button type="submit" style="margin-top: 15px;">Konfiguration speichern</button>
+            <button type="submit" class="btn-save">Speichern</button>
+        </form>
+
+        <form action="/reset" method="post" onsubmit="return confirm('Wirklich alle Geräte und das Gateway löschen?');">
+            <button type="submit" class="btn-danger">⚠️ System komplett zurücksetzen</button>
         </form>
     </div>
 </body>
@@ -136,55 +91,44 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    pairing_active = request.args.get('pairing') == 'true'
-    msg = request.args.get('msg')
+    # Versuche API-Key automatisch zu finden, falls nicht in Settings
+    settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600, "contacts": []})
+    api_key = settings.get("deconz_api_key") or get_api_key_from_db()
     
-    settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600, "notification_mode": "all", "contacts": []})
-    state = load_json(STATE_FILE, {"last_activity": time.time()})
-    
-    api_key = settings.get("deconz_api_key", "")
-    contacts_str = ", ".join([c["number"] for c in settings.get("contacts", [])])
-    last_act = time.strftime('%H:%M:%S', time.localtime(state.get("last_activity", time.time())))
-    
-    devices = get_zigbee_devices(api_key)
-    
-    return render_template_string(HTML_TEMPLATE, settings=settings, contacts_str=contacts_str, last_act_time=last_act, pairing_active=pairing_active, devices=devices, api_key=api_key, msg=msg)
+    # Falls wir einen Key gefunden haben, den wir noch nicht gespeichert hatten:
+    if api_key and not settings.get("deconz_api_key"):
+        settings["deconz_api_key"] = api_key
+        with open(SETTINGS_FILE, "w") as f: json.dump(settings, f)
 
-@app.route('/fetch_api_key', methods=['POST'])
-def fetch_api_key():
-    try:
-        # Fragt bei deCONZ einen neuen, offiziellen API-Key an
-        r = requests.post(f"{DECONZ_HOST}/api", json={"devicetype": "slg-dashboard"}, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and "success" in data[0]:
-                new_key = data[0]["success"]["username"]
-                settings = load_json(SETTINGS_FILE, {})
-                settings["deconz_api_key"] = new_key
-                save_settings(settings)
-                return redirect('/?msg=apikey_success')
-    except: pass
-    return redirect('/?msg=apikey_failed')
+    contacts_str = ", ".join([c["number"] for c in settings.get("contacts", [])])
+    devices = get_zigbee_devices(api_key)
+    return render_template_string(HTML_TEMPLATE, settings=settings, contacts_str=contacts_str, devices=devices)
+
+@app.route('/pair', methods=['POST'])
+def pair():
+    key = load_json(SETTINGS_FILE, {}).get("deconz_api_key")
+    if key: requests.put(f"{DECONZ_HOST}/api/{key}/config", json={"permitjoin": 60})
+    return redirect('/')
+
+@app.route('/reset', methods=['POST'])
+def reset():
+    # Gateway plattmachen
+    subprocess.run(["systemctl", "stop", "deconz"])
+    subprocess.run(["rm", "-rf", "/root/.local/share/dresden-elektronik/deCONZ/"])
+    # Settings & State löschen
+    if os.path.exists(SETTINGS_FILE): os.remove(SETTINGS_FILE)
+    if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
+    subprocess.run(["systemctl", "start", "deconz"])
+    return "System wurde zurückgesetzt. Bitte Seite in 10 Sekunden neu laden."
 
 @app.route('/save', methods=['POST'])
 def save():
     settings = load_json(SETTINGS_FILE, {})
     settings['timeout_seconds'] = int(request.form['timeout_seconds'])
-    settings['notification_mode'] = request.form['notification_mode']
     raw_numbers = [n.strip() for n in request.form['contacts_raw'].split(',') if n.strip()]
     settings['contacts'] = [{"number": num, "priority": i+1} for i, num in enumerate(raw_numbers)]
-    save_settings(settings)
+    with open(SETTINGS_FILE, "w") as f: json.dump(settings, f)
     return redirect('/')
 
-@app.route('/pair', methods=['POST'])
-def pair():
-    settings = load_json(SETTINGS_FILE, {})
-    api_key = settings.get("deconz_api_key", "")
-    if api_key:
-        try:
-            requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60}, timeout=5)
-        except: pass
-    return redirect('/?pairing=true')
-
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=80, threaded=True)
+    app.run(host='0.0.0.0', port=80)
