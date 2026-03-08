@@ -1,14 +1,14 @@
 #!/bin/bash
 # ==============================================================================
-# Smart Light Guard - Microservice Provisioning Script
+# Smart Light Guard - System Setup (Git-Edition)
 # ==============================================================================
 
-echo "🚀 Starte vollautomatisches Setup (Microservice-Edition)..."
+echo "🚀 Starte System-Konfiguration..."
 
-# 1. System Update & Hostname (für .local Erreichbarkeit)
+# 1. System Update & Hostname
 hostnamectl set-hostname smart-light-guard-poc
 apt update && apt upgrade -y
-apt install avahi-daemon -y
+apt install avahi-daemon git -y
 
 # 2. deCONZ (Phoscon) Gateway installieren
 wget -O - http://phoscon.de/apt/deconz.pub.key | gpg --dearmor -o /usr/share/keyrings/deconz-archive-keyring.gpg
@@ -29,23 +29,11 @@ if ! grep -q "dtoverlay=disable-bt" /boot/firmware/config.txt; then
 fi
 systemctl disable serial-getty@ttyAMA0.service
 
-# 6. Applikations-Verzeichnis erstellen und Module herunterladen
-echo "📥 Lade Microservices aus dem GitHub-Repo herunter..."
-APP_DIR="/opt/smart-light-guard"
-mkdir -p $APP_DIR
-
-REPO_URL="https://raw.githubusercontent.com/benshta/smart-light-guard/main"
-
-wget -O $APP_DIR/1_dashboard.py $REPO_URL/1_dashboard.py
-wget -O $APP_DIR/2_monitor.py $REPO_URL/2_monitor.py
-wget -O $APP_DIR/3_cloud_sync.py $REPO_URL/3_cloud_sync.py
-wget -O $APP_DIR/4_alert_handler.py $REPO_URL/4_alert_handler.py
-
 # ==============================================================================
-# 7. SYSTEMD SERVICES ERSTELLEN
+# 6. SYSTEMD SERVICES ERSTELLEN
 # ==============================================================================
-
 echo "⚙️ Richte Systemd-Dienste ein..."
+APP_DIR="/opt/smart-light-guard"
 
 cat <<EOF > /etc/systemd/system/slg-dashboard.service
 [Unit]
@@ -91,13 +79,12 @@ WantedBy=multi-user.target
 EOF
 
 # ==============================================================================
-# 8. Setup abschließen
+# 7. Setup abschließen
 # ==============================================================================
-
 systemctl daemon-reload
 systemctl enable deconz slg-dashboard slg-monitor slg-cloud-sync
 
-echo "✅ Installation erfolgreich! Alle 3 Microservices sind konfiguriert."
+echo "✅ System-Setup erfolgreich!"
 echo "🔄 Das System startet in 5 Sekunden neu..."
 sleep 5
 reboot
