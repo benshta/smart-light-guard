@@ -9,8 +9,7 @@ alert_handler = import_module("4_alert_handler")
 
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
-API_KEY = "3B80CF27C6"
-WS_URL = f"ws://127.0.0.1:8080/?api_key={API_KEY}"
+DECONZ_HOST = "127.0.0.1:8080"
 
 settings_cache = {}
 last_settings_mtime = 0
@@ -31,6 +30,7 @@ def load_settings_hot_reload():
 def save_state_throttled(force=False):
     global last_state_write
     current_time = time.time()
+    # Maximal alle 60 Sekunden speichern, um die SD-Karte zu schonen
     if force or (current_time - last_state_write > 60):
         try:
             with open(STATE_FILE, "w") as f:
@@ -79,14 +79,24 @@ def on_message(ws, message):
 def run_websocket():
     while True:
         try:
-            ws = websocket.WebSocketApp(WS_URL, on_message=on_message)
-            ws.run_forever()
+            # Holt sich den API-Key direkt aus dem RAM-Cache, der vom Watchdog aktuell gehalten wird
+            api_key = settings_cache.get("deconz_api_key", "")
+            
+            if api_key:
+                ws_url = f"ws://{DECONZ_HOST}/?api_key={api_key}"
+                ws = websocket.WebSocketApp(ws_url, on_message=on_message)
+                ws.run_forever()
+            else:
+                print("⏳ [MONITOR] Warte auf API-Key aus dem Dashboard...")
         except: pass
+        
+        # Falls die Verbindung abbricht oder noch kein Key da ist, 5 Sekunden warten und neu probieren
         time.sleep(5)
 
 if __name__ == "__main__":
     print("🚀 Monitor gestartet...")
     load_initial_state()
+    
     if os.path.exists(SETTINGS_FILE):
         load_settings_hot_reload()
     else:
