@@ -1,78 +1,45 @@
-import time
-import json
-import os
-import requests
+import json, time, os, requests
+from datetime import datetime, timezone
 
-SETTINGS_FILE = "settings.json"
-STATE_FILE = "state.json"
-
-# Platzhalter-APIs für deine Cloud
-CLOUD_HEALTH_API = "https://api.deine-domain.com/v1/health"
-CLOUD_SETTINGS_API = "https://api.deine-domain.com/v1/settings/smart-light-guard-poc"
-
-HEARTBEAT_INTERVAL = 300  # 5 Minuten
-SYNC_INTERVAL = 900       # 15 Minuten
-
-def load_local_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
-        except: pass
-    return {"updated_at": 0}
-
-def save_local_settings(data):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    print("☁️ [SYNC] Lokale Settings aus der Cloud aktualisiert.")
+SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
+HEARTBEAT_URL = "https://eldercare.palffy.top/api/v1/hubs/heartbeat"
+SYNC_INTERVAL = 900  # 15 Minuten
 
 def send_heartbeat():
-    try:
-        state = {}
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r") as f:
-                state = json.load(f)
-                
-        payload = {
-            "device_id": "smart-light-guard-poc",
-            "status": "online",
-            "last_sensor_activity": state.get("last_activity", 0),
-            "timestamp": time.time()
-        }
-        # requests.post(CLOUD_HEALTH_API, json=payload, timeout=5)
-        print("💓 [HEALTH] Heartbeat an Cloud gesendet.")
-    except Exception as e:
-        print(f"⚠️ [HEALTH] Fehler: {e}")
-
-def sync_settings():
-    local_settings = load_local_settings()
-    local_time = local_settings.get("updated_at", 0)
+    if not os.path.exists(SETTINGS_FILE): return
+    with open(SETTINGS_FILE, "r") as f: settings = json.load(f)
     
+    hub_id = settings.get("hub_id")
+    api_key = settings.get("hub_api_key")
+
+    if not hub_id or not api_key:
+        print("Kein Hub registriert. Überspringe Heartbeat.")
+        return
+
+    headers = {"X-Hub-Api-Key": api_key, "Content-Type": "application/json"}
+    payload = {
+        "hub_id": hub_id,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "version": "0.1.0"
+    }
+
     try:
-        # Mockup für POC:
-        cloud_settings = {"updated_at": 0} 
-        cloud_time = cloud_settings.get("updated_at", 0)
-        
-        if cloud_time > local_time:
-            save_local_settings(cloud_settings)
-        elif local_time > cloud_time:
-            # requests.put(CLOUD_SETTINGS_API, json=local_settings, timeout=5)
-            print("☁️ [SYNC] Lokale Änderungen in die Cloud gepusht.")
+        response = requests.post(HEARTBEAT_URL, json=payload, headers=headers, timeout=10)
+        if response.status_code == 200:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Heartbeat gesendet.")
             
+            # Neue Settings vom Server verarbeiten (falls vorhanden)
+            cloud_settings = response.json()
+            if cloud_settings and cloud_settings.get("inactivity_threshold_hours"):
+                # Wenn der Server die Stunden schickt, rechnen wir sie in Sekunden um
+                settings["timeout_seconds"] = int(cloud_settings["inactivity_threshold_hours"]) * 3600
+                with open(SETTINGS_FILE, "w") as f: json.dump(settings, f, indent=4)
+                print("Neue Timeouts vom Server übernommen!")
     except Exception as e:
-        print(f"⚠️ [SYNC] Fehler: {e}")
+        print(f"Cloud-Fehler: {e}")
 
 if __name__ == "__main__":
-    print("☁️ Cloud Sync Agent gestartet...")
-    last_heartbeat = 0
-    last_sync = 0
-    
+    print("Starte Cloud Sync Agent...")
     while True:
-        current_time = time.time()
-        if current_time - last_heartbeat >= HEARTBEAT_INTERVAL:
-            send_heartbeat()
-            last_heartbeat = current_time
-        if current_time - last_sync >= SYNC_INTERVAL:
-            sync_settings()
-            last_sync = current_time
-        time.sleep(10)
+        send_heartbeat()
+        time.sleep(SYNC_INTERVAL)
