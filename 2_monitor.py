@@ -1,106 +1,62 @@
-import websocket
-import json
-import threading
-import time
-import os
-from importlib import import_module
+import json, time, os, subprocess
+import websocket # Achtung: apt install python3-websocket
 
-alert_handler = import_module("4_alert_handler")
+SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
+STATE_FILE = "/opt/smart-light-guard/state.json"
+DECONZ_WS = "ws://127.0.0.1:443" # Standard Phoscon Websocket Port
 
-SETTINGS_FILE = "settings.json"
-STATE_FILE = "state.json"
-DECONZ_HOST = "127.0.0.1:8080"
-
-settings_cache = {}
-last_settings_mtime = 0
-state_cache = {"last_activity": time.time(), "alert_sent": False}
-last_state_write = 0
-
-def load_settings_hot_reload():
-    global settings_cache, last_settings_mtime
-    try:
-        current_mtime = os.path.getmtime(SETTINGS_FILE)
-        if current_mtime > last_settings_mtime:
-            with open(SETTINGS_FILE, "r") as f:
-                settings_cache = json.load(f)
-            last_settings_mtime = current_mtime
-            print("🔄 [MONITOR] Neue Settings geladen.")
-    except: pass
-
-def save_state_throttled(force=False):
-    global last_state_write
-    current_time = time.time()
-    # Maximal alle 60 Sekunden speichern, um die SD-Karte zu schonen
-    if force or (current_time - last_state_write > 60):
-        try:
-            with open(STATE_FILE, "w") as f:
-                json.dump(state_cache, f)
-            last_state_write = current_time
-        except: pass
-
-def load_initial_state():
-    global state_cache
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                state_cache = json.load(f)
-        except: pass
-
-def watchdog_timer():
-    while True:
-        load_settings_hot_reload()
-        timeout = settings_cache.get("timeout_seconds", 3600)
-        elapsed = time.time() - state_cache['last_activity']
-        
-        if elapsed > timeout and not state_cache['alert_sent']:
-            if alert_handler.send_alarm(settings_cache, elapsed):
-                state_cache['alert_sent'] = True
-                save_state_throttled(force=True)
-        time.sleep(5)
+def update_activity():
+    state = {"last_activity": time.time(), "alert_sent": False}
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+    print(f"Aktivität erkannt! Timer zurückgesetzt.")
 
 def on_message(ws, message):
     data = json.loads(message)
-    if data.get("e") == "changed":
-        state = data.get("state", {})
-        resource = data.get("r")
-        
-        is_activity = False
-        if resource == "sensors" and any(k in state for k in ["presence", "buttonevent", "open", "vibration"]):
-            is_activity = True
-        elif resource == "lights" and ("on" in state or "reachable" in state):
-            is_activity = True
+    # Reagiere auf Sensor-Events oder Lichtschalter
+    if data.get("e") == "changed" or data.get("e") == "added":
+        update_activity()
 
-        if is_activity:
-            state_cache['last_activity'] = time.time()
-            state_cache['alert_sent'] = False
-            save_state_throttled()
-            print(f">>> [ACTIVITY] {resource.upper()} erkannt.")
+def on_error(ws, error):
+    print(f"Websocket Fehler: {error}")
 
-def run_websocket():
+def on_close(ws, close_status_code, close_msg):
+    print("Websocket geschlossen. Versuche Neustart in 5s...")
+    time.sleep(5)
+
+# --- Haupt-Logik ---
+if __name__ == "__main__":
+    print("Starte SLG Monitor...")
+    update_activity() # Initiale Aktivität setzen
+
+    # Websocket in eigenem Prozess oder Thread starten, hier vereinfacht
+    import threading
+    ws = websocket.WebSocketApp(DECONZ_WS, on_message=on_message, on_error=on_error, on_close=on_close)
+    wst = threading.Thread(target=ws.run_forever)
+    wst.daemon = True
+    wst.start()
+
     while True:
         try:
-            # Holt sich den API-Key direkt aus dem RAM-Cache, der vom Watchdog aktuell gehalten wird
-            api_key = settings_cache.get("deconz_api_key", "")
+            with open(SETTINGS_FILE, "r") as f: settings = json.load(f)
+            with open(STATE_FILE, "r") as f: state = json.load(f)
             
-            if api_key:
-                ws_url = f"ws://{DECONZ_HOST}/?api_key={api_key}"
-                ws = websocket.WebSocketApp(ws_url, on_message=on_message)
-                ws.run_forever()
-            else:
-                print("⏳ [MONITOR] Warte auf API-Key aus dem Dashboard...")
-        except: pass
-        
-        # Falls die Verbindung abbricht oder noch kein Key da ist, 5 Sekunden warten und neu probieren
-        time.sleep(5)
+            timeout = settings.get("timeout_seconds", 3600)
+            last_activity = state.get("last_activity", time.time())
+            alert_sent = state.get("alert_sent", False)
 
-if __name__ == "__main__":
-    print("🚀 Monitor gestartet...")
-    load_initial_state()
-    
-    if os.path.exists(SETTINGS_FILE):
-        load_settings_hot_reload()
-    else:
-        settings_cache = {"timeout_seconds": 3600, "contacts": []}
-        
-    threading.Thread(target=run_websocket, daemon=True).start()
-    watchdog_timer()
+            # Wenn Inaktivität das Limit überschreitet und noch kein Alarm gesendet wurde
+            if (time.time() - last_activity) > timeout and not alert_sent:
+                print("🚨 INAKTIVITÄT ERKANNT! LÖSE ALARM AUS...")
+                
+                # Rufe das Alarm-Skript auf
+                subprocess.run(["python3", "/opt/smart-light-guard/4_alert_handler.py"])
+                
+                # Markiere als gesendet, bis wieder Bewegung erkannt wird
+                state["alert_sent"] = True
+                with open(STATE_FILE, "w") as f: json.dump(state, f)
+
+        except Exception as e:
+            pass # Dateien fehlen noch
+            
+        time.sleep(10) # Alle 10 Sekunden prüfen
