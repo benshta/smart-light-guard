@@ -1,4 +1,4 @@
-import json, time, os, requests, sqlite3, subprocess
+import json, time, os, requests, sqlite3, subprocess, uuid
 from flask import Flask, render_template_string, request, redirect
 
 SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
@@ -9,16 +9,43 @@ CLOUD_API = "https://eldercare.palffy.top/api/v1"
 
 app = Flask(__name__)
 
-def get_api_key_from_db():
-    if not os.path.exists(DECONZ_DB): return None
+def force_inject_api_key():
+    new_key = uuid.uuid4().hex[:16].upper()
     try:
+        subprocess.run(["systemctl", "stop", "deconz"])
         conn = sqlite3.connect(DECONZ_DB)
         cur = conn.cursor()
-        cur.execute("SELECT apikey FROM auth LIMIT 1")
-        row = cur.fetchone()
+        cur.execute("CREATE TABLE IF NOT EXISTS auth (apikey TEXT PRIMARY KEY, devicetype TEXT, createdate TEXT, lastusedate TEXT, useragent TEXT)")
+        cur.execute("INSERT OR IGNORE INTO auth (apikey, devicetype) VALUES (?, 'slg-dashboard')", (new_key,))
+        conn.commit()
         conn.close()
-        return row[0] if row else None
+        subprocess.run(["systemctl", "start", "deconz"])
+        time.sleep(3)
+        return new_key
     except: return None
+
+def get_or_create_api_key():
+    settings = load_json(SETTINGS_FILE, {})
+    if settings.get("deconz_api_key"): return settings["deconz_api_key"]
+    if os.path.exists(DECONZ_DB):
+        try:
+            conn = sqlite3.connect(DECONZ_DB)
+            cur = conn.cursor()
+            cur.execute("SELECT apikey FROM auth LIMIT 1")
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                settings["deconz_api_key"] = row[0]
+                save_json(SETTINGS_FILE, settings)
+                return row[0]
+        except: pass
+    if os.path.exists(DECONZ_DB):
+        key = force_inject_api_key()
+        if key:
+            settings["deconz_api_key"] = key
+            save_json(SETTINGS_FILE, settings)
+            return key
+    return None
 
 def load_json(filepath, default):
     if os.path.exists(filepath):
@@ -64,7 +91,6 @@ HTML_TEMPLATE = """
     </style>
     {% if request.args.get('pairing') %}
     <script>
-        // Kleiner Countdown für die UX
         let timeLeft = 60;
         let timerId = setInterval(countdown, 1000);
         function countdown() {
@@ -86,13 +112,10 @@ HTML_TEMPLATE = """
         {% if request.args.get('pairing') %}
             <div class="status banner-success">
                 ⏳ <b>Pairing-Modus aktiv! (<span id="timer">60</span>s)</b><br>
-                <small>Bitte drücke jetzt den Reset-Knopf an deinem Sensor/Lichtschalter.</small>
+                <small>Bitte drücke jetzt den Reset-Knopf an deinem Sensor.</small>
             </div>
         {% elif request.args.get('error') == 'nokey' %}
-            <div class="status banner-error">
-                ❌ <b>Lokales Gateway noch nicht bereit.</b><br>
-                <small>Bitte warte einen Moment oder starte den Pi neu.</small>
-            </div>
+            <div class="status banner-error">❌ <b>Gateway-Zugriff fehlgeschlagen.</b></div>
         {% else %}
             <form action="/pair" method="post">
                 <button type="submit" class="btn-pair">➕ Sensor jetzt anlernen</button>
@@ -129,10 +152,14 @@ HTML_TEMPLATE = """
         <form action="/save" method="post">
             <label>Inaktivitäts-Limit (Sekunden):</label>
             <input type="number" name="timeout_seconds" value="{{ settings.timeout_seconds }}">
-            <button type="submit" class="btn-save">💾 Speichern</button>
+            
+            <label>Notfall-Nummern (Komma-getrennt):</label>
+            <input type="text" name="contacts_raw" value="{{ contacts_str }}" placeholder="+41791234567, +41781234567">
+            
+            <button type="submit" class="btn-save">💾 Speichern & Synchronisieren</button>
         </form>
 
-        <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen? Cloud-Verbindung und Geräte werden entfernt.');">
+        <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen?');">
             <button type="submit" class="btn-danger">⚠️ System komplett zurücksetzen</button>
         </form>
     </div>
@@ -142,40 +169,28 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600})
-    
-    # 1. API Key holen (entweder aus Settings oder frisch aus der DB)
-    api_key = settings.get("deconz_api_key") or get_api_key_from_db()
-    
-    # 2. Key speichern, falls er neu aus der DB kam
-    if api_key and not settings.get("deconz_api_key"):
-        settings["deconz_api_key"] = api_key
-        save_json(SETTINGS_FILE, settings)
-    
+    settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600, "contacts": []})
+    api_key = get_or_create_api_key()
     devices = get_zigbee_devices(api_key)
-    return render_template_string(HTML_TEMPLATE, settings=settings, devices=devices)
+    
+    # Kontakte für das HTML-Feld als schönen String formatieren
+    contacts_str = ", ".join([c["number"] for c in settings.get("contacts", [])])
+    
+    return render_template_string(HTML_TEMPLATE, settings=settings, contacts_str=contacts_str, devices=devices)
 
 @app.route('/pair', methods=['POST'])
 def pair():
-    # Versuche den Key direkt nochmal zu holen, falls er frisch generiert wurde
-    settings = load_json(SETTINGS_FILE, {})
-    api_key = settings.get("deconz_api_key") or get_api_key_from_db()
-    
+    api_key = get_or_create_api_key()
     if api_key:
-        # Gateway für 60 Sekunden öffnen
-        requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60})
-        # Lade die Seite neu und zeige den Banner an
-        return redirect('/?pairing=true')
-    else:
-        # Zeige Fehlermeldung, wenn deCONZ noch nicht bereit ist
-        return redirect('/?error=nokey')
+        r = requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60})
+        if r.status_code == 200: return redirect('/?pairing=true')
+    return redirect('/?error=nokey')
 
 @app.route('/cloud_register', methods=['POST'])
 def cloud_register():
     email = request.form['email']
     password = request.form['password']
     name = request.form['name']
-
     try:
         r = requests.post(f"{CLOUD_API}/auth/register", json={"email": email, "password": password})
         if r.status_code not in (200, 201):
@@ -195,16 +210,21 @@ def cloud_register():
         settings["hub_api_key"] = token 
         settings["household_id"] = household_id
         save_json(SETTINGS_FILE, settings)
-
-    except Exception as e:
-        print(f"Fehler bei Registrierung: {e}")
-
+    except: pass
     return redirect('/')
 
 @app.route('/save', methods=['POST'])
 def save():
     settings = load_json(SETTINGS_FILE, {})
     settings['timeout_seconds'] = int(request.form['timeout_seconds'])
+    
+    # Kontakte aus dem Input-Feld lesen und als saubere Liste speichern
+    raw_numbers = [n.strip() for n in request.form['contacts_raw'].split(',') if n.strip()]
+    settings['contacts'] = [{"number": num, "priority": i+1} for i, num in enumerate(raw_numbers)]
+    
+    # Zeitstempel setzen, damit der Cloud-Sync weiß, dass es lokale Updates gibt
+    settings['local_update_timestamp'] = time.time()
+    
     save_json(SETTINGS_FILE, settings)
     return redirect('/')
 
@@ -218,5 +238,4 @@ def reset():
     return "System gelöscht. Lade Seite in 10 Sekunden neu."
 
 if __name__ == "__main__":
-    # Starte den Flask-Server auf Port 80
     app.run(host='0.0.0.0', port=80)
