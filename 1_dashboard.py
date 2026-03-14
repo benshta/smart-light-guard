@@ -52,50 +52,87 @@ HTML_TEMPLATE = """
         body { font-family: -apple-system, sans-serif; padding: 20px; background: #f0f2f5; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; margin: 0 auto 15px auto; }
         button { width: 100%; padding: 12px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; }
-        .btn-pair { background: #28a745; color: white; }
+        .btn-pair { background: #28a745; color: white; font-size: 1.1em; }
         .btn-save { background: #007bff; color: white; }
         .btn-cloud { background: #6f42c1; color: white; }
         .btn-danger { background: #dc3545; color: white; font-size: 0.8em; margin-top: 30px; }
         input { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
-        .status { padding: 10px; background: #e9ecef; border-radius: 6px; margin-bottom: 15px; font-family: monospace; font-size: 0.9em; word-break: break-all; }
+        .status { padding: 10px; border-radius: 6px; margin-bottom: 15px; }
+        .status-cloud { background: #e9ecef; font-family: monospace; font-size: 0.9em; word-break: break-all; }
+        .banner-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; text-align: center; font-size: 1.1em; padding: 15px; }
+        .banner-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; text-align: center; }
     </style>
+    {% if request.args.get('pairing') %}
+    <script>
+        // Kleiner Countdown für die UX
+        let timeLeft = 60;
+        let timerId = setInterval(countdown, 1000);
+        function countdown() {
+            if (timeLeft == 0) {
+                clearTimeout(timerId);
+                window.location.href = "/";
+            } else {
+                document.getElementById("timer").innerHTML = timeLeft;
+                timeLeft--;
+            }
+        }
+    </script>
+    {% endif %}
 </head>
 <body>
     <div class="card">
-        <h2 style="text-align:center; color:#007bff;">🛡️ Smart Light Guard</h2>
-        <form action="/pair" method="post"><button type="submit" class="btn-pair">➕ Zigbee-Gerät anlernen (60s)</button></form>
-        <h3>📶 Sensoren</h3>
-        {% for dev in devices %}
-            <div style="padding:5px 0; border-bottom:1px solid #eee;">{{ dev.name }}</div>
-        {% endfor %}
-    </div>
-
-    <div class="card">
-        <h3>☁️ Cloud Backend Verbindung</h3>
-        {% if settings.hub_id %}
-            <div class="status">✅ Verbunden!<br>Hub ID: {{ settings.hub_id }}</div>
-        {% else %}
-            <div class="status" style="background:#fff3cd; color:#856404;">⚠️ Nicht registriert</div>
-        {% endif %}
+        <h2 style="text-align:center; color:#28a745;">🔌 1. Zigbee-Sensoren</h2>
         
-        <form action="/cloud_register" method="post">
-            <p style="font-size:0.9em; color:#666;">Schnell-Registrierung (erstellt automatisch Haushalt & Hub):</p>
-            <input type="email" name="email" placeholder="E-Mail Adresse" required>
-            <input type="password" name="password" placeholder="Passwort" required>
-            <input type="text" name="name" placeholder="Name (z.B. Oma Erna)" required>
-            <button type="submit" class="btn-cloud">☁️ Am Server registrieren</button>
-        </form>
+        {% if request.args.get('pairing') %}
+            <div class="status banner-success">
+                ⏳ <b>Pairing-Modus aktiv! (<span id="timer">60</span>s)</b><br>
+                <small>Bitte drücke jetzt den Reset-Knopf an deinem Sensor/Lichtschalter.</small>
+            </div>
+        {% elif request.args.get('error') == 'nokey' %}
+            <div class="status banner-error">
+                ❌ <b>Lokales Gateway noch nicht bereit.</b><br>
+                <small>Bitte warte einen Moment oder starte den Pi neu.</small>
+            </div>
+        {% else %}
+            <form action="/pair" method="post">
+                <button type="submit" class="btn-pair">➕ Sensor jetzt anlernen</button>
+            </form>
+        {% endif %}
+
+        <h3 style="margin-top: 20px;">📶 Verbundene Geräte</h3>
+        {% if devices %}
+            {% for dev in devices %}
+                <div style="padding:8px 0; border-bottom:1px solid #eee;">✅ {{ dev.name }}</div>
+            {% endfor %}
+        {% else %}
+            <p style="color:#666; font-size:0.9em; text-align:center;">Noch keine Geräte angelernt.</p>
+        {% endif %}
     </div>
 
     <div class="card">
-        <h3>⚙️ Lokale Einstellungen</h3>
+        <h2 style="text-align:center; color:#6f42c1;">☁️ 2. Cloud Server</h2>
+        {% if settings.hub_id %}
+            <div class="status status-cloud">✅ Hub verbunden!<br>ID: {{ settings.hub_id }}</div>
+        {% else %}
+            <div class="status banner-error">⚠️ Hub ist noch nicht beim Server registriert.</div>
+            <form action="/cloud_register" method="post">
+                <input type="email" name="email" placeholder="E-Mail Adresse" required>
+                <input type="password" name="password" placeholder="Passwort" required>
+                <input type="text" name="name" placeholder="Name (z.B. Oma Erna)" required>
+                <button type="submit" class="btn-cloud">☁️ Am Server registrieren</button>
+            </form>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2 style="text-align:center; color:#007bff;">⚙️ 3. Einstellungen</h2>
         <form action="/save" method="post">
             <label>Inaktivitäts-Limit (Sekunden):</label>
             <input type="number" name="timeout_seconds" value="{{ settings.timeout_seconds }}">
             <button type="submit" class="btn-save">💾 Speichern</button>
         </form>
 
-        <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen?');">
+        <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen? Cloud-Verbindung und Geräte werden entfernt.');">
             <button type="submit" class="btn-danger">⚠️ System komplett zurücksetzen</button>
         </form>
     </div>
@@ -106,13 +143,32 @@ HTML_TEMPLATE = """
 @app.route('/')
 def index():
     settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600})
+    
+    # 1. API Key holen (entweder aus Settings oder frisch aus der DB)
     api_key = settings.get("deconz_api_key") or get_api_key_from_db()
+    
+    # 2. Key speichern, falls er neu aus der DB kam
     if api_key and not settings.get("deconz_api_key"):
         settings["deconz_api_key"] = api_key
         save_json(SETTINGS_FILE, settings)
     
     devices = get_zigbee_devices(api_key)
     return render_template_string(HTML_TEMPLATE, settings=settings, devices=devices)
+
+@app.route('/pair', methods=['POST'])
+def pair():
+    # Versuche den Key direkt nochmal zu holen, falls er frisch generiert wurde
+    settings = load_json(SETTINGS_FILE, {})
+    api_key = settings.get("deconz_api_key") or get_api_key_from_db()
+    
+    if api_key:
+        # Gateway für 60 Sekunden öffnen
+        requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60})
+        # Lade die Seite neu und zeige den Banner an
+        return redirect('/?pairing=true')
+    else:
+        # Zeige Fehlermeldung, wenn deCONZ noch nicht bereit ist
+        return redirect('/?error=nokey')
 
 @app.route('/cloud_register', methods=['POST'])
 def cloud_register():
@@ -121,7 +177,6 @@ def cloud_register():
     name = request.form['name']
 
     try:
-        # 1. Registrieren (oder einloggen falls existiert)
         r = requests.post(f"{CLOUD_API}/auth/register", json={"email": email, "password": password})
         if r.status_code not in (200, 201):
             r = requests.post(f"{CLOUD_API}/auth/login", json={"email": email, "password": password})
@@ -129,30 +184,21 @@ def cloud_register():
         token = r.json().get("access_token")
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 2. Haushalt erstellen
         r = requests.post(f"{CLOUD_API}/households", json={"name": f"Haushalt {name}"}, headers=headers)
         household_id = r.json().get("id")
 
-        # 3. Hub erstellen
         r = requests.post(f"{CLOUD_API}/hubs", json={"household_id": household_id, "name": f"Hub {name}"}, headers=headers)
         hub_data = r.json()
 
-        # 4. Speichern (Wir nehmen das Token als provisorischen API-Key, falls das Backend keinen eigenen schickt)
         settings = load_json(SETTINGS_FILE, {})
         settings["hub_id"] = hub_data.get("id") or hub_data.get("hub_id")
-        settings["hub_api_key"] = token # Swagger Doku zeigt (noch) keinen separaten Hub-API-Key im Response
+        settings["hub_api_key"] = token 
         settings["household_id"] = household_id
         save_json(SETTINGS_FILE, settings)
 
     except Exception as e:
         print(f"Fehler bei Registrierung: {e}")
 
-    return redirect('/')
-
-@app.route('/pair', methods=['POST'])
-def pair():
-    key = load_json(SETTINGS_FILE, {}).get("deconz_api_key")
-    if key: requests.put(f"{DECONZ_HOST}/api/{key}/config", json={"permitjoin": 60})
     return redirect('/')
 
 @app.route('/save', methods=['POST'])
@@ -172,4 +218,5 @@ def reset():
     return "System gelöscht. Lade Seite in 10 Sekunden neu."
 
 if __name__ == "__main__":
+    # Starte den Flask-Server auf Port 80
     app.run(host='0.0.0.0', port=80)
