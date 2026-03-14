@@ -3,33 +3,55 @@ from flask import Flask, render_template_string, request, redirect
 
 SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
 STATE_FILE = "/opt/smart-light-guard/state.json"
-DECONZ_DB = "/root/.local/share/dresden-elektronik/deCONZ/zll.db"
 DECONZ_HOST = "http://127.0.0.1:8080"
 CLOUD_API = "https://eldercare.palffy.top/api/v1"
 
 app = Flask(__name__)
 
+def get_deconz_db_path():
+    """Sucht die DB im richtigen Benutzerordner (benji, pi, root)"""
+    paths = [
+        "/home/benji/.local/share/dresden-elektronik/deCONZ/zll.db",
+        "/home/pi/.local/share/dresden-elektronik/deCONZ/zll.db",
+        "/var/lib/deconz/.local/share/dresden-elektronik/deCONZ/zll.db",
+        "/root/.local/share/dresden-elektronik/deCONZ/zll.db"
+    ]
+    for p in paths:
+        if os.path.exists(p): return p
+    return paths[0] # Fallback auf benji
+
 def force_inject_api_key():
+    db_path = get_deconz_db_path()
     new_key = uuid.uuid4().hex[:16].upper()
     try:
-        subprocess.run(["systemctl", "stop", "deconz"])
-        conn = sqlite3.connect(DECONZ_DB)
+        subprocess.run(["systemctl", "stop", "deconz", "deconz-headless"], stderr=subprocess.DEVNULL)
+        
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS auth (apikey TEXT PRIMARY KEY, devicetype TEXT, createdate TEXT, lastusedate TEXT, useragent TEXT)")
         cur.execute("INSERT OR IGNORE INTO auth (apikey, devicetype) VALUES (?, 'slg-dashboard')", (new_key,))
         conn.commit()
         conn.close()
-        subprocess.run(["systemctl", "start", "deconz"])
-        time.sleep(3)
+        
+        # BERECHTIGUNGEN REPARIEREN: Wichtig, damit der normale User die Datei lesen darf
+        os.system(f"chmod -R 777 {os.path.dirname(db_path)}")
+        
+        subprocess.run(["systemctl", "start", "deconz"], stderr=subprocess.DEVNULL)
+        time.sleep(4) # Gateway kurz Zeit zum Hochfahren geben
         return new_key
-    except: return None
+    except Exception as e:
+        print(f"DB Fehler: {e}")
+        return None
 
 def get_or_create_api_key():
     settings = load_json(SETTINGS_FILE, {})
     if settings.get("deconz_api_key"): return settings["deconz_api_key"]
-    if os.path.exists(DECONZ_DB):
+    
+    db_path = get_deconz_db_path()
+    if os.path.exists(db_path):
         try:
-            conn = sqlite3.connect(DECONZ_DB)
+            conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute("SELECT apikey FROM auth LIMIT 1")
             row = cur.fetchone()
@@ -39,12 +61,12 @@ def get_or_create_api_key():
                 save_json(SETTINGS_FILE, settings)
                 return row[0]
         except: pass
-    if os.path.exists(DECONZ_DB):
-        key = force_inject_api_key()
-        if key:
-            settings["deconz_api_key"] = key
-            save_json(SETTINGS_FILE, settings)
-            return key
+        
+    key = force_inject_api_key()
+    if key:
+        settings["deconz_api_key"] = key
+        save_json(SETTINGS_FILE, settings)
+        return key
     return None
 
 def load_json(filepath, default):
@@ -115,7 +137,7 @@ HTML_TEMPLATE = """
                 <small>Bitte drücke jetzt den Reset-Knopf an deinem Sensor.</small>
             </div>
         {% elif request.args.get('error') == 'nokey' %}
-            <div class="status banner-error">❌ <b>Gateway-Zugriff fehlgeschlagen.</b></div>
+            <div class="status banner-error">❌ <b>Gateway-Zugriff fehlgeschlagen.</b><br>API-Verbindung verweigert.</div>
         {% else %}
             <form action="/pair" method="post">
                 <button type="submit" class="btn-pair">➕ Sensor jetzt anlernen</button>
@@ -152,11 +174,9 @@ HTML_TEMPLATE = """
         <form action="/save" method="post">
             <label>Inaktivitäts-Limit (Sekunden):</label>
             <input type="number" name="timeout_seconds" value="{{ settings.timeout_seconds }}">
-            
             <label>Notfall-Nummern (Komma-getrennt):</label>
             <input type="text" name="contacts_raw" value="{{ contacts_str }}" placeholder="+41791234567, +41781234567">
-            
-            <button type="submit" class="btn-save">💾 Speichern & Synchronisieren</button>
+            <button type="submit" class="btn-save">💾 Speichern</button>
         </form>
 
         <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen?');">
@@ -172,18 +192,19 @@ def index():
     settings = load_json(SETTINGS_FILE, {"timeout_seconds": 3600, "contacts": []})
     api_key = get_or_create_api_key()
     devices = get_zigbee_devices(api_key)
-    
-    # Kontakte für das HTML-Feld als schönen String formatieren
     contacts_str = ", ".join([c["number"] for c in settings.get("contacts", [])])
-    
     return render_template_string(HTML_TEMPLATE, settings=settings, contacts_str=contacts_str, devices=devices)
 
 @app.route('/pair', methods=['POST'])
 def pair():
     api_key = get_or_create_api_key()
     if api_key:
-        r = requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60})
-        if r.status_code == 200: return redirect('/?pairing=true')
+        try:
+            r = requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60}, timeout=5)
+            if r.status_code == 200:
+                return redirect('/?pairing=true')
+        except Exception as e:
+            print(f"Fehler bei deCONZ Anfrage: {e}")
     return redirect('/?error=nokey')
 
 @app.route('/cloud_register', methods=['POST'])
@@ -198,15 +219,12 @@ def cloud_register():
         
         token = r.json().get("access_token")
         headers = {"Authorization": f"Bearer {token}"}
-
         r = requests.post(f"{CLOUD_API}/households", json={"name": f"Haushalt {name}"}, headers=headers)
         household_id = r.json().get("id")
-
         r = requests.post(f"{CLOUD_API}/hubs", json={"household_id": household_id, "name": f"Hub {name}"}, headers=headers)
-        hub_data = r.json()
-
+        
         settings = load_json(SETTINGS_FILE, {})
-        settings["hub_id"] = hub_data.get("id") or hub_data.get("hub_id")
+        settings["hub_id"] = r.json().get("id") or r.json().get("hub_id")
         settings["hub_api_key"] = token 
         settings["household_id"] = household_id
         save_json(SETTINGS_FILE, settings)
@@ -217,21 +235,17 @@ def cloud_register():
 def save():
     settings = load_json(SETTINGS_FILE, {})
     settings['timeout_seconds'] = int(request.form['timeout_seconds'])
-    
-    # Kontakte aus dem Input-Feld lesen und als saubere Liste speichern
     raw_numbers = [n.strip() for n in request.form['contacts_raw'].split(',') if n.strip()]
     settings['contacts'] = [{"number": num, "priority": i+1} for i, num in enumerate(raw_numbers)]
-    
-    # Zeitstempel setzen, damit der Cloud-Sync weiß, dass es lokale Updates gibt
     settings['local_update_timestamp'] = time.time()
-    
     save_json(SETTINGS_FILE, settings)
     return redirect('/')
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    subprocess.run(["systemctl", "stop", "deconz"])
+    subprocess.run(["systemctl", "stop", "deconz", "deconz-headless"])
     subprocess.run(["rm", "-rf", "/root/.local/share/dresden-elektronik/deCONZ/"])
+    subprocess.run(["rm", "-rf", "/home/benji/.local/share/dresden-elektronik/deCONZ/"])
     if os.path.exists(SETTINGS_FILE): os.remove(SETTINGS_FILE)
     if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
     subprocess.run(["systemctl", "start", "deconz"])
