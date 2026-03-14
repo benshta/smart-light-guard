@@ -83,11 +83,18 @@ def get_zigbee_devices(api_key):
     devices = []
     if not api_key: return devices
     try:
+        # 1. Sensoren abrufen
         r = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=2)
         if r.status_code == 200:
             for sid, data in r.json().items():
                 if data.get("type") not in ["Daylight", "ZHASwitch"]:
                     devices.append({"name": data.get("name"), "type": "Sensor"})
+        
+        # 2. Lampen & Steckdosen abrufen
+        r2 = requests.get(f"{DECONZ_HOST}/api/{api_key}/lights", timeout=2)
+        if r2.status_code == 200:
+            for lid, data in r2.json().items():
+                devices.append({"name": data.get("name"), "type": "Licht/Aktor"})
     except: pass
     return devices
 
