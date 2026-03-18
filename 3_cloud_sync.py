@@ -2,15 +2,15 @@ import json, time, os, requests
 from datetime import datetime, timezone
 
 SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
-HEARTBEAT_URL = "https://eldercare.palffy.top/api/v1/hubs/heartbeat"
 SYNC_INTERVAL = 900  # 15 Minuten
 
 def send_heartbeat():
     if not os.path.exists(SETTINGS_FILE): return
     with open(SETTINGS_FILE, "r") as f: settings = json.load(f)
     
-    hub_id = settings.get("hub_id")
-    api_key = settings.get("hub_api_key")
+    hub_id = settings["backend"].get("hub_id")
+    api_key = settings["backend"].get("api_key")
+    base_url = settings["backend"].get("base_url")
 
     if not hub_id or not api_key:
         print("Kein Hub registriert. Überspringe Heartbeat.")
@@ -24,17 +24,20 @@ def send_heartbeat():
     }
 
     try:
-        response = requests.post(HEARTBEAT_URL, json=payload, headers=headers, timeout=10)
-        if response.status_code == 200:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Heartbeat gesendet.")
+        url = f"{base_url}/hubs/heartbeat"
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code in [200, 201]:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Heartbeat erfolgreich gesendet.")
             
-            # Neue Settings vom Server verarbeiten (falls vorhanden)
+            # Neue Settings vom Server verarbeiten
             cloud_settings = response.json()
-            if cloud_settings and cloud_settings.get("inactivity_threshold_hours"):
-                # Wenn der Server die Stunden schickt, rechnen wir sie in Sekunden um
-                settings["timeout_seconds"] = int(cloud_settings["inactivity_threshold_hours"]) * 3600
-                with open(SETTINGS_FILE, "w") as f: json.dump(settings, f, indent=4)
-                print("Neue Timeouts vom Server übernommen!")
+            if cloud_settings and "inactivity_threshold_hours" in cloud_settings:
+                new_timeout = int(cloud_settings["inactivity_threshold_hours"]) * 3600
+                if settings["alert_settings"]["timeout_seconds"] != new_timeout:
+                    settings["alert_settings"]["timeout_seconds"] = new_timeout
+                    with open(SETTINGS_FILE, "w") as f: json.dump(settings, f, indent=4)
+                    print(f"Neue Timeouts vom Server übernommen: {new_timeout} Sekunden")
     except Exception as e:
         print(f"Cloud-Fehler: {e}")
 

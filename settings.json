@@ -1,0 +1,12 @@
+{
+    "deconz_api_key": "",
+    "backend": {
+        "base_url": "https://eldercare.palffy.top/api/v1",
+        "api_key": "",
+        "hub_id": "",
+        "household_id": ""
+    },
+    "alert_settings": {
+        "timeout_seconds": 43200
+    }
+}

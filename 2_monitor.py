@@ -1,62 +1,91 @@
-import json, time, os, subprocess
-import websocket # Achtung: apt install python3-websocket
+import json, uuid, requests, time, os
+from datetime import datetime, timezone
 
 SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
-STATE_FILE = "/opt/smart-light-guard/state.json"
-DECONZ_WS = "ws://127.0.0.1:443" # Standard Phoscon Websocket Port
+DECONZ_HOST = "http://127.0.0.1:8080"
 
-def update_activity():
-    state = {"last_activity": time.time(), "alert_sent": False}
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-    print(f"Aktivität erkannt! Timer zurückgesetzt.")
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE): return None
+    with open(SETTINGS_FILE, 'r') as f: return json.load(f)
 
-def on_message(ws, message):
-    data = json.loads(message)
-    # Reagiere auf Sensor-Events oder Lichtschalter
-    if data.get("e") == "changed" or data.get("e") == "added":
-        update_activity()
+def trigger_inactivity_alert(settings):
+    unique_event_uuid = f"evt-{uuid.uuid4()}" 
+    current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    payload_data = {
+        "event_uuid": unique_event_uuid,
+        "hub_id": settings["backend"]["hub_id"],
+        "event_type": "inactivity_alert",
+        "event_time": current_utc_time,
+        "payload": {}
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "X-Hub-Api-Key": settings["backend"]["api_key"]
+    }
+    
+    url = f"{settings['backend']['base_url']}/alerts"
+    
+    print(f"🚨 INAKTIVITÄT ERKANNT! Sende Alarm (UUID: {unique_event_uuid})...")
+    try:
+        response = requests.post(url, json=payload_data, headers=headers, timeout=10)
+        if response.status_code in [200, 201]:
+            print("✅ Alarm erfolgreich vom Backend verarbeitet!")
+            return True
+        else:
+            print(f"❌ Fehler vom Backend: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"⚠️ Verbindungsfehler zum Backend: {e}")
+    return False
 
-def on_error(ws, error):
-    print(f"Websocket Fehler: {error}")
+def get_latest_sensor_activity(api_key):
+    try:
+        r = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=5)
+        if r.status_code != 200: return None
+        
+        latest_time = None
+        for sid, data in r.json().items():
+            state = data.get("state", {})
+            last_updated = state.get("lastupdated")
+            if last_updated and last_updated != "none":
+                # deCONZ liefert ISO 8601 UTC ohne Z (z.B. "2026-03-18T16:00:00")
+                try:
+                    dt = datetime.strptime(last_updated, "%Y-%m-%dT%H:%M:%S")
+                    dt = dt.replace(tzinfo=timezone.utc)
+                    if not latest_time or dt > latest_time:
+                        latest_time = dt
+                except: pass
+        return latest_time
+    except:
+        return None
 
-def on_close(ws, close_status_code, close_msg):
-    print("Websocket geschlossen. Versuche Neustart in 5s...")
-    time.sleep(5)
-
-# --- Haupt-Logik ---
 if __name__ == "__main__":
-    print("Starte SLG Monitor...")
-    update_activity() # Initiale Aktivität setzen
-
-    # Websocket in eigenem Prozess oder Thread starten, hier vereinfacht
-    import threading
-    ws = websocket.WebSocketApp(DECONZ_WS, on_message=on_message, on_error=on_error, on_close=on_close)
-    wst = threading.Thread(target=ws.run_forever)
-    wst.daemon = True
-    wst.start()
+    print("Starte Smart Light Guard Überwachungs-Dienst...")
+    alert_triggered = False
 
     while True:
-        try:
-            with open(SETTINGS_FILE, "r") as f: settings = json.load(f)
-            with open(STATE_FILE, "r") as f: state = json.load(f)
+        settings = load_settings()
+        if not settings or not settings.get("deconz_api_key") or not settings["backend"].get("hub_id"):
+            time.sleep(30)
+            continue
             
-            timeout = settings.get("timeout_seconds", 3600)
-            last_activity = state.get("last_activity", time.time())
-            alert_sent = state.get("alert_sent", False)
-
-            # Wenn Inaktivität das Limit überschreitet und noch kein Alarm gesendet wurde
-            if (time.time() - last_activity) > timeout and not alert_sent:
-                print("🚨 INAKTIVITÄT ERKANNT! LÖSE ALARM AUS...")
-                
-                # Rufe das Alarm-Skript auf
-                subprocess.run(["python3", "/opt/smart-light-guard/4_alert_handler.py"])
-                
-                # Markiere als gesendet, bis wieder Bewegung erkannt wird
-                state["alert_sent"] = True
-                with open(STATE_FILE, "w") as f: json.dump(state, f)
-
-        except Exception as e:
-            pass # Dateien fehlen noch
+        timeout_seconds = settings["alert_settings"]["timeout_seconds"]
+        latest_activity = get_latest_sensor_activity(settings["deconz_api_key"])
+        
+        if latest_activity:
+            time_since_activity = (datetime.now(timezone.utc) - latest_activity).total_seconds()
+            print(f"Letzte Bewegung vor {int(time_since_activity)} Sekunden (Limit: {timeout_seconds}s)")
             
+            if time_since_activity > timeout_seconds:
+                if not alert_triggered:
+                    success = trigger_inactivity_alert(settings)
+                    if success:
+                        alert_triggered = True
+                        print("⏳ Gehe in Cooldown-Modus für 1 Stunde, um Spam zu vermeiden...")
+                        time.sleep(3600) # 1 Stunde Cooldown nach Alarm
+            else:
+                # Bewegung erkannt, Reset des Alarm-Status
+                alert_triggered = False
+                
         time.sleep(10) # Alle 10 Sekunden prüfen
