@@ -90,12 +90,26 @@ def get_zigbee_devices(api_key):
     devices = []
     if not api_key: return devices
     try:
+        # 1. Alle Sensoren, Schalter, Kontakte abrufen
         r = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=2)
         if r.status_code == 200:
             for sid, data in r.json().items():
-                if data.get("type") not in ["Daylight", "ZHASwitch"]:
-                    devices.append({"name": data.get("name"), "type": "Sensor"})
-    except: pass
+                if data.get("type") != "Daylight":  # Virtuelle Sonne ignorieren!
+                    t = data.get("type", "")
+                    if "Switch" in t: dev_type = "🔘 Schalter"
+                    elif "Presence" in t: dev_type = "🏃 Bewegung"
+                    elif "OpenClose" in t: dev_type = "🚪 Kontakt"
+                    else: dev_type = "📡 Sensor"
+                    devices.append({"name": data.get("name"), "type": dev_type})
+        
+        # 2. Alle Lichter & Steckdosen abrufen
+        r2 = requests.get(f"{DECONZ_HOST}/api/{api_key}/lights", timeout=2)
+        if r2.status_code == 200:
+            for lid, data in r2.json().items():
+                devices.append({"name": data.get("name"), "type": "💡 Licht/Aktor"})
+                
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der Geräte: {e}")
     return devices
 
 HTML_TEMPLATE = """
@@ -121,8 +135,9 @@ HTML_TEMPLATE = """
         .status-success { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
         .status-error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
         .device-list { background: #f8fafc; padding: 10px; border-radius: 8px; }
-        .device-item { padding: 8px 0; border-bottom: 1px solid #e2e8f0; }
+        .device-item { padding: 8px 0; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between;}
         .device-item:last-child { border-bottom: none; }
+        .dev-type { color: #64748b; font-size: 0.85em; }
     </style>
     {% if request.args.get('pairing') %}
     <script>
@@ -137,11 +152,11 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <div class="card">
-            <h2 style="color:#10b981;">🔌 Sensor Kopplung</h2>
+            <h2 style="color:#10b981;">🔌 Geräte & Sensoren</h2>
             {% if request.args.get('pairing') %}
                 <div class="status status-success">
                     ⏳ <b>Pairing-Modus aktiv! (<span id="timer">60</span>s)</b><br>
-                    <small>Bitte jetzt Sensor zurücksetzen (z.B. Knopf 5s drücken).</small>
+                    <small>Bitte jetzt Gerät koppeln (z.B. Reset-Knopf drücken).</small>
                 </div>
             {% else %}
                 <form action="/pair" method="post"><button type="submit" class="btn-pair">➕ Gerät jetzt anlernen</button></form>
@@ -150,7 +165,12 @@ HTML_TEMPLATE = """
             <h3 style="margin-top:20px; font-size:1em; color:#64748b;">Verbunden:</h3>
             <div class="device-list">
             {% if devices %}
-                {% for dev in devices %}<div class="device-item">✅ {{ dev.name }}</div>{% endfor %}
+                {% for dev in devices %}
+                <div class="device-item">
+                    <span>✅ {{ dev.name }}</span>
+                    <span class="dev-type">{{ dev.type }}</span>
+                </div>
+                {% endfor %}
             {% else %}
                 <div style="color:#94a3b8; text-align:center;">Keine Geräte gefunden</div>
             {% endif %}
