@@ -1,8 +1,11 @@
 import json, time, os, requests, sqlite3, subprocess, uuid
 from flask import Flask, render_template_string, request, redirect
+from slg_logger import get_logger
 
+logger = get_logger("DASHBOARD")
 SETTINGS_FILE = "/opt/smart-light-guard/settings.json"
 DECONZ_HOST = "http://127.0.0.1:8080"
+LOG_FILE = "/opt/smart-light-guard/system.log"
 
 app = Flask(__name__)
 
@@ -16,10 +19,12 @@ def load_json(filepath):
         try:
             with open(filepath, "r") as f:
                 data = json.load(f)
-                # Merge defaults to avoid KeyError
                 default.update(data)
+                if "backend" in data: default["backend"].update(data["backend"])
+                if "alert_settings" in data: default["alert_settings"].update(data["alert_settings"])
                 return default
-        except: pass
+        except Exception as e:
+            logger.error(f"Fehler beim Laden der Settings: {e}")
     return default
 
 def save_json(filepath, data):
@@ -39,6 +44,7 @@ def force_inject_api_key():
     db_path = get_deconz_db_path()
     new_key = uuid.uuid4().hex[:16].upper()
     try:
+        logger.info("Injiziere neuen deCONZ API-Key in die Datenbank...")
         subprocess.run(["systemctl", "stop", "deconz", "deconz-headless"], stderr=subprocess.DEVNULL)
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         conn = sqlite3.connect(db_path)
@@ -50,9 +56,10 @@ def force_inject_api_key():
         os.system(f"chmod -R 777 {os.path.dirname(db_path)}")
         subprocess.run(["systemctl", "start", "deconz"], stderr=subprocess.DEVNULL)
         time.sleep(4)
+        logger.info("API-Key erfolgreich injiziert.")
         return new_key
     except Exception as e:
-        print(f"DB Fehler: {e}")
+        logger.error(f"DB Fehler beim Key-Inject: {e}")
         return None
 
 def get_or_create_api_key(settings):
@@ -107,7 +114,8 @@ HTML_TEMPLATE = """
         .btn-pair { background: #10b981; color: white; font-size: 1.1em; }
         .btn-cloud { background: #6366f1; color: white; }
         .btn-save { background: #3b82f6; color: white; }
-        .btn-danger { background: #ef4444; color: white; margin-top: 20px; }
+        .btn-log { background: #475569; color: white; margin-top: 20px; }
+        .btn-danger { background: #ef4444; color: white; margin-top: 10px; }
         input { width: 100%; padding: 12px; margin: 8px 0 15px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
         .status { padding: 12px; border-radius: 8px; margin-bottom: 15px; text-align: center; }
         .status-success { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
@@ -171,6 +179,10 @@ HTML_TEMPLATE = """
                 <input type="number" name="timeout_seconds" value="{{ settings.alert_settings.timeout_seconds }}">
                 <button type="submit" class="btn-save">💾 Speichern</button>
             </form>
+            
+            <form action="/logs" method="get">
+                <button type="submit" class="btn-log">📜 System-Logs ansehen</button>
+            </form>
             <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen?');">
                 <button type="submit" class="btn-danger">⚠️ System zurücksetzen</button>
             </form>
@@ -194,8 +206,10 @@ def pair():
     if api_key:
         try:
             requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60}, timeout=5)
+            logger.info("Pairing-Modus für 60 Sekunden aktiviert.")
             return redirect('/?pairing=true')
-        except: pass
+        except Exception as e:
+            logger.error(f"Fehler beim Aktivieren des Pairing-Modus: {e}")
     return redirect('/?error=nokey')
 
 @app.route('/cloud_register', methods=['POST'])
@@ -206,6 +220,7 @@ def cloud_register():
     settings = load_json(SETTINGS_FILE)
     base_url = settings["backend"]["base_url"]
     
+    logger.info(f"Versuche Cloud-Registrierung für '{name}'...")
     try:
         r = requests.post(f"{base_url}/auth/register", json={"email": email, "password": password})
         if r.status_code not in (200, 201):
@@ -223,25 +238,59 @@ def cloud_register():
         settings["backend"]["api_key"] = token
         settings["backend"]["household_id"] = household_id
         save_json(SETTINGS_FILE, settings)
+        logger.info(f"Cloud-Registrierung erfolgreich! Hub-ID: {settings['backend']['hub_id']}")
     except Exception as e:
-        print(f"Cloud-Fehler: {e}")
+        logger.error(f"Cloud-Registrierung fehlgeschlagen: {e}")
     return redirect('/')
 
 @app.route('/save', methods=['POST'])
 def save():
     settings = load_json(SETTINGS_FILE)
-    settings["alert_settings"]["timeout_seconds"] = int(request.form['timeout_seconds'])
+    new_timeout = int(request.form['timeout_seconds'])
+    settings["alert_settings"]["timeout_seconds"] = new_timeout
     save_json(SETTINGS_FILE, settings)
+    logger.info(f"Lokale Einstellungen gespeichert. Neues Timeout: {new_timeout}s")
     return redirect('/')
 
 @app.route('/reset', methods=['POST'])
 def reset():
+    logger.warning("Führe System-Reset durch! Lösche alle Daten...")
     subprocess.run(["systemctl", "stop", "deconz"])
     subprocess.run(["rm", "-rf", "/root/.local/share/dresden-elektronik/deCONZ/"])
     subprocess.run(["rm", "-rf", "/home/benji/.local/share/dresden-elektronik/deCONZ/"])
     if os.path.exists(SETTINGS_FILE): os.remove(SETTINGS_FILE)
     subprocess.run(["systemctl", "start", "deconz"])
     return "System gelöscht. Bitte Seite manuell neu laden."
+
+@app.route('/logs')
+def show_logs():
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r") as f:
+                lines = f.readlines()[-100:]
+                lines.reverse()
+                log_text = "".join(lines)
+        else:
+            log_text = "Log-Datei existiert noch nicht."
+    except Exception as e:
+        log_text = f"Fehler beim Lesen der Logs: {e}"
+        
+    return f"""
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>System Logs</title>
+        <style>body {{ background: #1e1e1e; color: #00ff00; font-family: monospace; padding: 15px; font-size: 14px; line-height: 1.4; word-wrap: break-word; }}</style>
+    </head>
+    <body>
+        <h2 style="color: white; margin-top: 0;">📜 System Logs (Letzte 100 Einträge)</h2>
+        <a href="/" style="color: #3b82f6; text-decoration: none; font-size: 16px; display: inline-block; margin-bottom: 20px;">🔙 Zurück zum Dashboard</a>
+        <div style="background: black; padding: 15px; border-radius: 8px; overflow-x: auto;">
+            <pre style="margin: 0; white-space: pre-wrap;">{log_text}</pre>
+        </div>
+    </body>
+    </html>
+    """
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=80)

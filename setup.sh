@@ -26,7 +26,7 @@ apt install -y deconz python3-websocket python3-requests python3-flask
 # CODE AUS DEM GIT REPOSITORY LADEN
 # ==============================================================================
 APP_DIR="/opt/smart-light-guard"
-GIT_REPO="https://github.com/benshta/smart-light-guard.git" # <--- HIER DEINEN GIT LINK EINTRAGEN
+GIT_REPO="https://github.com/benshta/smart-light-guard.git"
 
 echo "📥 Lade neuesten Code aus dem Git-Repository..."
 mkdir -p $APP_DIR
@@ -70,6 +70,7 @@ usermod -a -G dialout,tty,i2c $MAIN_USER
 # ==============================================================================
 # SYSTEMD SERVICES & OVERRIDES
 # ==============================================================================
+echo "⚙️ Richte Systemd-Dienste ein..."
 mkdir -p /etc/systemd/system/deconz.service.d/
 cat <<EOF > /etc/systemd/system/deconz.service.d/override.conf
 [Service]
