@@ -20,35 +20,61 @@ def get_websocket_port(api_key):
         return r.json().get("websocketport", 8080)
     except: return 8080
 
-def update_state_activity():
-    """Speichert den Zeitstempel der letzten Bewegung persistent."""
-    now = time.time()
-    try:
-        with open(STATE_FILE, "w") as f: json.dump({"last_activity": now}, f)
-    except Exception as e:
-        logger.error(f"Konnte State nicht speichern: {e}")
-    return now
-
-def get_last_activity():
-    """Liest den letzten Zeitstempel aus (überlebt Neustarts)."""
+# --- NEUES STATE-MANAGEMENT ---
+def load_state():
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r") as f: 
-                return json.load(f).get("last_activity", time.time())
+            with open(STATE_FILE, "r") as f: return json.load(f)
         except: pass
-    return update_state_activity()
+    return {"last_activity": time.time(), "last_alert": 0}
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w") as f: json.dump(state, f)
+    except Exception as e:
+        logger.error(f"Konnte State nicht speichern: {e}")
+
+def update_state_activity():
+    """Wird bei jeder erkannten Aktivität (Bewegung, Licht an) aufgerufen."""
+    state = load_state()
+    state["last_activity"] = time.time()
+    save_state(state)
+    return state["last_activity"]
+
+def set_alert_triggered():
+    """Speichert den Zeitpunkt des Alarms ab."""
+    state = load_state()
+    state["last_alert"] = time.time()
+    save_state(state)
+# ------------------------------
 
 def on_ws_message(ws, message):
-    """Wird in der Millisekunde ausgelöst, in der ein Sensor funkt!"""
+    """Wird in der Millisekunde ausgelöst, in der ein Gerät funkt!"""
     try:
         data = json.loads(message)
         if data.get("e") == "changed" and "state" in data:
             state = data["state"]
-            if "presence" in state or "buttonevent" in state or "open" in state:
-                dev_type = data.get("r", "Sensor")
+            
+            is_activity = False
+            activity_type = "Unbekannt"
+            
+            if "presence" in state and state["presence"] == True:
+                is_activity = True; activity_type = "Bewegung"
+            elif "open" in state:
+                is_activity = True; activity_type = "Tür/Fenster"
+            elif "buttonevent" in state:
+                is_activity = True; activity_type = "Knopfdruck"
+            elif "on" in state:
+                is_activity = True; activity_type = "Licht geschaltet"
+
+            if is_activity:
+                dev_type = data.get("r", "Gerät") 
                 dev_id = data.get("id", "?")
-                logger.info(f"⚡ Aktivität in Echtzeit erkannt! ({dev_type} ID: {dev_id})")
+                logger.info(f"⚡ Aktivität [{activity_type}] erkannt! ({dev_type} ID: {dev_id})")
+                
+                # Wenn eine Bewegung stattfindet, wird der Timer sicher resettet
                 update_state_activity()
+                
     except Exception as e:
         logger.error(f"WebSocket Parsing Fehler: {e}")
 
@@ -98,14 +124,11 @@ def trigger_alert(settings):
     return False
 
 if __name__ == "__main__":
-    logger.info("🚀 Starte Monitor (Echtzeit-Event-Architektur)...")
+    logger.info("🚀 Starte Monitor (Smart Cooldown Architektur)...")
     
-    # WebSocket-Lauscher als Hintergrund-Thread starten
     threading.Thread(target=websocket_thread, daemon=True).start()
     
-    alert_triggered = False
-    
-    # Haupt-Thread: Überwacht stur den Timer
+    # Haupt-Thread: Überwacht stur die Limits ohne den Thread zu blockieren
     while True:
         settings = load_settings()
         if not settings or not settings["backend"].get("hub_id"):
@@ -113,18 +136,33 @@ if __name__ == "__main__":
             continue
             
         timeout_seconds = settings["alert_settings"]["timeout_seconds"]
-        last_activity = get_last_activity()
-        time_since = time.time() - last_activity
+        state = load_state()
+        now = time.time()
         
-        if time_since > timeout_seconds:
-            if not alert_triggered:
+        last_activity = state.get("last_activity", now)
+        last_alert = state.get("last_alert", 0)
+        
+        # 1. GAB ES EINE BEWEGUNG SEIT DEM LETZTEN ALARM?
+        if last_activity > last_alert:
+            # Normaler Modus
+            time_since_activity = now - last_activity
+            if time_since_activity > timeout_seconds:
                 if trigger_alert(settings):
-                    alert_triggered = True
-                    logger.info("⏳ Gehe in Cooldown (1 Stunde), um Spam zu vermeiden...")
-                    time.sleep(30)
+                    set_alert_triggered()
+                    logger.info("⏳ Gehe in Cooldown (1 Stunde)...")
+        
+        # 2. ES GAB KEINE BEWEGUNG SEIT DEM ALARM
         else:
-            if alert_triggered:
-                logger.info("🟢 Bewegung erkannt! Alarm-Status zurückgesetzt. System wieder scharf.")
-                alert_triggered = False
-                
-        time.sleep(10)
+            time_since_alert = now - last_alert
+            cooldown_seconds = 3600 # 1 Stunde Pause
+            
+            if time_since_alert > cooldown_seconds:
+                # Cooldown ist abgelaufen. Wir warten jetzt WIEDER timeout_seconds (X Stunden/Minuten).
+                time_since_cooldown_end = time_since_alert - cooldown_seconds
+                if time_since_cooldown_end > timeout_seconds:
+                    logger.warning("Erneute Inaktivität nach Cooldown erkannt! Nächster Alarm wird gesendet.")
+                    if trigger_alert(settings):
+                        set_alert_triggered()
+                        logger.info("⏳ Gehe erneut in Cooldown (1 Stunde)...")
+                        
+        time.sleep(10) # 10 Sekunden warten und Timer neu prüfen
