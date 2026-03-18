@@ -83,7 +83,7 @@ if __name__ == "__main__":
                     if success:
                         alert_triggered = True
                         print("⏳ Gehe in Cooldown-Modus für 1 Stunde, um Spam zu vermeiden...")
-                        time.sleep(3600) # 1 Stunde Cooldown nach Alarm
+                        time.sleep(30) # 1 Stunde Cooldown nach Alarm
             else:
                 # Bewegung erkannt, Reset des Alarm-Status
                 alert_triggered = False
