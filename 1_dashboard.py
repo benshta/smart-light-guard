@@ -28,7 +28,11 @@ def load_json(filepath):
     return default
 
 def save_json(filepath, data):
-    with open(filepath, "w") as f: json.dump(data, f, indent=4)
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "w") as f: json.dump(data, f, indent=4)
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern der Settings: {e}")
 
 def get_deconz_db_path():
     paths = [
@@ -55,7 +59,7 @@ def force_inject_api_key():
         conn.close()
         os.system(f"chmod -R 777 {os.path.dirname(db_path)}")
         subprocess.run(["systemctl", "start", "deconz"], stderr=subprocess.DEVNULL)
-        time.sleep(4)
+        time.sleep(5) # Etwas mehr Zeit für den Neustart geben
         logger.info("API-Key erfolgreich injiziert.")
         return new_key
     except Exception as e:
@@ -64,7 +68,6 @@ def force_inject_api_key():
 
 def get_or_create_api_key(settings):
     if settings.get("deconz_api_key"): return settings["deconz_api_key"]
-    
     db_path = get_deconz_db_path()
     if os.path.exists(db_path):
         try:
@@ -77,8 +80,9 @@ def get_or_create_api_key(settings):
                 settings["deconz_api_key"] = row[0]
                 save_json(SETTINGS_FILE, settings)
                 return row[0]
-        except: pass
-        
+        except Exception as e:
+            logger.warning(f"Konnte Key nicht aus DB lesen: {e}")
+    
     key = force_inject_api_key()
     if key:
         settings["deconz_api_key"] = key
@@ -90,11 +94,10 @@ def get_zigbee_devices(api_key):
     devices = []
     if not api_key: return devices
     try:
-        # 1. Alle Sensoren, Schalter, Kontakte abrufen
-        r = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=2)
+        r = requests.get(f"{DECONZ_HOST}/api/{api_key}/sensors", timeout=3)
         if r.status_code == 200:
             for sid, data in r.json().items():
-                if data.get("type") != "Daylight":  # Virtuelle Sonne ignorieren!
+                if data.get("type") != "Daylight":
                     t = data.get("type", "")
                     if "Switch" in t: dev_type = "🔘 Schalter"
                     elif "Presence" in t: dev_type = "🏃 Bewegung"
@@ -102,14 +105,12 @@ def get_zigbee_devices(api_key):
                     else: dev_type = "📡 Sensor"
                     devices.append({"name": data.get("name"), "type": dev_type})
         
-        # 2. Alle Lichter & Steckdosen abrufen
-        r2 = requests.get(f"{DECONZ_HOST}/api/{api_key}/lights", timeout=2)
+        r2 = requests.get(f"{DECONZ_HOST}/api/{api_key}/lights", timeout=3)
         if r2.status_code == 200:
             for lid, data in r2.json().items():
                 devices.append({"name": data.get("name"), "type": "💡 Licht/Aktor"})
-                
-    except Exception as e:
-        logger.error(f"Fehler beim Laden der Geräte: {e}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Konnte Geräte nicht von deCONZ laden (deCONZ offline?): {e}")
     return devices
 
 HTML_TEMPLATE = """
@@ -156,7 +157,7 @@ HTML_TEMPLATE = """
             {% if request.args.get('pairing') %}
                 <div class="status status-success">
                     ⏳ <b>Pairing-Modus aktiv! (<span id="timer">60</span>s)</b><br>
-                    <small>Bitte jetzt Gerät koppeln (z.B. Reset-Knopf drücken).</small>
+                    <small>Bitte jetzt Gerät koppeln.</small>
                 </div>
             {% else %}
                 <form action="/pair" method="post"><button type="submit" class="btn-pair">➕ Gerät jetzt anlernen</button></form>
@@ -172,7 +173,7 @@ HTML_TEMPLATE = """
                 </div>
                 {% endfor %}
             {% else %}
-                <div style="color:#94a3b8; text-align:center;">Keine Geräte gefunden</div>
+                <div style="color:#94a3b8; text-align:center;">Keine Geräte (Oder deCONZ startet noch)</div>
             {% endif %}
             </div>
         </div>
@@ -199,13 +200,8 @@ HTML_TEMPLATE = """
                 <input type="number" name="timeout_seconds" value="{{ settings.alert_settings.timeout_seconds }}">
                 <button type="submit" class="btn-save">💾 Speichern</button>
             </form>
-            
-            <form action="/logs" method="get">
-                <button type="submit" class="btn-log">📜 System-Logs ansehen</button>
-            </form>
-            <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen?');">
-                <button type="submit" class="btn-danger">⚠️ System zurücksetzen</button>
-            </form>
+            <form action="/logs" method="get"><button type="submit" class="btn-log">📜 System-Logs ansehen</button></form>
+            <form action="/reset" method="post" onsubmit="return confirm('Wirklich ALLES löschen?');"><button type="submit" class="btn-danger">⚠️ System zurücksetzen</button></form>
         </div>
     </div>
 </body>
@@ -225,8 +221,9 @@ def pair():
     api_key = settings.get("deconz_api_key")
     if api_key:
         try:
-            requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60}, timeout=5)
-            logger.info("Pairing-Modus für 60 Sekunden aktiviert.")
+            r = requests.put(f"{DECONZ_HOST}/api/{api_key}/config", json={"permitjoin": 60}, timeout=5)
+            r.raise_for_status()
+            logger.info("Pairing-Modus aktiviert.")
             return redirect('/?pairing=true')
         except Exception as e:
             logger.error(f"Fehler beim Aktivieren des Pairing-Modus: {e}")
@@ -242,26 +239,33 @@ def cloud_register():
     
     logger.info(f"Versuche Cloud-Registrierung für '{name}'...")
     try:
+        # Auth
         r = requests.post(f"{base_url}/auth/register", json={"email": email, "password": password})
         if r.status_code not in (200, 201):
             r = requests.post(f"{base_url}/auth/login", json={"email": email, "password": password})
-        
+        r.raise_for_status() # Bricht hart ab und loggt Fehler, falls Auth fehlschlägt
         token = r.json().get("access_token")
         headers = {"Authorization": f"Bearer {token}"}
         
+        # Household
         r_hh = requests.post(f"{base_url}/households", json={"name": name, "inactivity_threshold_hours": 12}, headers=headers)
+        r_hh.raise_for_status()
         household_id = r_hh.json().get("id")
         
+        # Hub
         r_hub = requests.post(f"{base_url}/hubs", json={"household_id": household_id, "name": f"Hub {name}"}, headers=headers)
+        r_hub.raise_for_status()
         
         settings["backend"]["hub_id"] = r_hub.json().get("id")
-        # FIX: Hier wird nun der korrekte API-Key aus dem Hub-Creation Request gespeichert statt des User JWT-Tokens
-        settings["backend"]["api_key"] = r_hub.json().get("api_key")
+        settings["backend"]["api_key"] = r_hub.json().get("api_key") # Der echte API Key!
         settings["backend"]["household_id"] = household_id
         save_json(SETTINGS_FILE, settings)
-        logger.info(f"Cloud-Registrierung erfolgreich! Hub-ID: {settings['backend']['hub_id']}")
+        logger.info(f"Cloud-Registrierung ERFOLGREICH! Hub-ID: {settings['backend']['hub_id']}")
+    except requests.exceptions.HTTPError as err:
+        logger.error(f"Cloud-Fehler: {err.response.status_code} - {err.response.text}")
     except Exception as e:
-        logger.error(f"Cloud-Registrierung fehlgeschlagen: {e}")
+        logger.error(f"Allgemeiner Fehler bei Cloud-Registrierung: {e}")
+        
     return redirect('/')
 
 @app.route('/save', methods=['POST'])
@@ -275,13 +279,13 @@ def save():
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    logger.warning("Führe System-Reset durch! Lösche alle Daten...")
+    logger.warning("Führe System-Reset durch!")
     subprocess.run(["systemctl", "stop", "deconz"])
     subprocess.run(["rm", "-rf", "/root/.local/share/dresden-elektronik/deCONZ/"])
     subprocess.run(["rm", "-rf", "/home/benji/.local/share/dresden-elektronik/deCONZ/"])
     if os.path.exists(SETTINGS_FILE): os.remove(SETTINGS_FILE)
     subprocess.run(["systemctl", "start", "deconz"])
-    return "System gelöscht. Bitte Seite manuell neu laden."
+    return "System gelöscht. Bitte Seite manuell neu laden (F5)."
 
 @app.route('/logs')
 def show_logs():
@@ -292,26 +296,10 @@ def show_logs():
                 lines.reverse()
                 log_text = "".join(lines)
         else:
-            log_text = "Log-Datei existiert noch nicht."
+            log_text = "Log-Datei existiert nicht."
     except Exception as e:
-        log_text = f"Fehler beim Lesen der Logs: {e}"
-        
-    return f"""
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>System Logs</title>
-        <style>body {{ background: #1e1e1e; color: #00ff00; font-family: monospace; padding: 15px; font-size: 14px; line-height: 1.4; word-wrap: break-word; }}</style>
-    </head>
-    <body>
-        <h2 style="color: white; margin-top: 0;">📜 System Logs (Letzte 100 Einträge)</h2>
-        <a href="/" style="color: #3b82f6; text-decoration: none; font-size: 16px; display: inline-block; margin-bottom: 20px;">🔙 Zurück zum Dashboard</a>
-        <div style="background: black; padding: 15px; border-radius: 8px; overflow-x: auto;">
-            <pre style="margin: 0; white-space: pre-wrap;">{log_text}</pre>
-        </div>
-    </body>
-    </html>
-    """
+        log_text = f"Fehler: {e}"
+    return f"<html><body style='background:#1e1e1e;color:#0f0;font-family:monospace;'><a href='/' style='color:#3b82f6;'>🔙 Zurück</a><pre>{log_text}</pre></body></html>"
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=80)
+    app.run(host='0.0.0.0', port=80, threaded=True)
