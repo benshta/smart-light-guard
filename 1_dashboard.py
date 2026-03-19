@@ -257,7 +257,8 @@ def cloud_register():
         r_hub.raise_for_status()
         
         settings["backend"]["hub_id"] = r_hub.json().get("id")
-        settings["backend"]["api_key"] = r_hub.json().get("api_key") # Der echte API Key!
+        # 🔥 HIER IST DER WICHTIGE FIX: Es wird der api_key des Hubs gespeichert, nicht das JWT-Token!
+        settings["backend"]["api_key"] = r_hub.json().get("api_key") 
         settings["backend"]["household_id"] = household_id
         save_json(SETTINGS_FILE, settings)
         logger.info(f"Cloud-Registrierung ERFOLGREICH! Hub-ID: {settings['backend']['hub_id']}")
