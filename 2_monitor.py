@@ -35,21 +35,50 @@ def update_state_activity(reason="Unbekannt"):
 def on_ws_message(ws, message):
     try:
         data = json.loads(message)
-        # Strikter Filter: Nur echte Statusänderungen erfassen, Routine-Pings ignorieren
-        if data.get("e") == "changed" and "state" in data:
-            state = data["state"]
+        
+        # Nur "changed" Events verarbeiten
+        if data.get("e") != "changed":
+            return
             
-            if state.get("presence") is True:
-                update_state_activity(f"Bewegung erkannt (ID {data.get('id')})")
-            elif "buttonevent" in state:
-                update_state_activity(f"Schalter betätigt (ID {data.get('id')})")
-            elif "open" in state:
-                status_text = "offen" if state["open"] else "geschlossen"
-                update_state_activity(f"Tür/Fenster {status_text} (ID {data.get('id')})")
-            elif "on" in state:
-                status_text = "an" if state["on"] else "aus"
-                update_state_activity(f"Licht/Aktor {status_text} (ID {data.get('id')})")
-    except: pass
+        state = data.get("state", {})
+        activity_detected = False
+        reason = ""
+
+        # 1. Bewegungssensoren
+        if "presence" in state and state["presence"] is True:
+            activity_detected = True
+            reason = "Bewegung erkannt"
+            
+        # 2. Smarte Taster / Fernbedienungen
+        elif "buttonevent" in state:
+            activity_detected = True
+            reason = f"Schalter betätigt ({state['buttonevent']})"
+            
+        # 3. Tür- und Fensterkontakte
+        elif "open" in state:
+            status = "offen" if state["open"] else "geschlossen"
+            activity_detected = True
+            reason = f"Tür/Fenster {status}"
+            
+        # 4. Licht/Aktor logisch geschaltet (App/Automation)
+        elif "on" in state:
+            status = "an" if state["on"] else "aus"
+            activity_detected = True
+            reason = f"Licht/Aktor {status}"
+            
+        # 5. Physischer Wandschalter (Stromunterbrechung) -> SEHR WICHTIG!
+        elif "reachable" in state:
+            status = "am Strom" if state["reachable"] else "vom Strom getrennt"
+            activity_detected = True
+            reason = f"Physischer Schalter betätigt ({status})"
+
+        # Nur speichern, wenn eines der definierten Events zutrifft
+        if activity_detected:
+            update_state_activity(f"{reason} (ID {data.get('id')})")
+
+    except Exception as e:
+        # Kein stilles Failen mehr! Hilft beim Debuggen von unerwarteten Payloads.
+        logger.debug(f"Ignoriere unlesbare WebSocket-Nachricht: {e}")
 
 def websocket_thread():
     while True:
