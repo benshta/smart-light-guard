@@ -41,43 +41,39 @@ def on_ws_message(ws, message):
             return
             
         state = data.get("state", {})
+        if not state:
+            return # Leere State-Updates ignorieren
+            
         activity_detected = False
         reason = ""
 
-        # 1. Bewegungssensoren
+        # 1. Bewegungssensoren (Aktivität nur bei echter Präsenz-ERKENNUNG)
         if "presence" in state and state["presence"] is True:
             activity_detected = True
             reason = "Bewegung erkannt"
             
-        # 2. Smarte Taster / Fernbedienungen
+        # 2. Smarte Taster / Fernbedienungen (Jeder Klick ist eine bewusste Handlung)
         elif "buttonevent" in state:
             activity_detected = True
             reason = f"Schalter betätigt ({state['buttonevent']})"
             
-        # 3. Tür- und Fensterkontakte
+        # 3. Tür- und Fensterkontakte (Jeder Statuswechsel offen/zu ist eine Aktivität)
         elif "open" in state:
             status = "offen" if state["open"] else "geschlossen"
             activity_detected = True
             reason = f"Tür/Fenster {status}"
             
-        # 4. Licht/Aktor logisch geschaltet (App/Automation)
+        # 4. Licht/Aktor (Jeder logische Schaltvorgang an/aus via App/Smart-Switch ist Aktivität)
         elif "on" in state:
             status = "an" if state["on"] else "aus"
             activity_detected = True
             reason = f"Licht/Aktor {status}"
-            
-        # 5. Physischer Wandschalter (Stromunterbrechung) -> SEHR WICHTIG!
-        elif "reachable" in state:
-            status = "am Strom" if state["reachable"] else "vom Strom getrennt"
-            activity_detected = True
-            reason = f"Physischer Schalter betätigt ({status})"
 
-        # Nur speichern, wenn eines der definierten Events zutrifft
+        # Nur speichern, wenn exakt eines dieser 4 Events zutrifft
         if activity_detected:
             update_state_activity(f"{reason} (ID {data.get('id')})")
 
     except Exception as e:
-        # Kein stilles Failen mehr! Hilft beim Debuggen von unerwarteten Payloads.
         logger.debug(f"Ignoriere unlesbare WebSocket-Nachricht: {e}")
 
 def websocket_thread():
