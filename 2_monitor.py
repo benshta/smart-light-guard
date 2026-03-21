@@ -47,29 +47,34 @@ def on_ws_message(ws, message):
         activity_detected = False
         reason = ""
 
-        # 1. Bewegungssensoren (Aktivität nur bei echter Präsenz-ERKENNUNG)
+        # 1. Bewegungssensoren (Nur echte Präsenz)
         if "presence" in state and state["presence"] is True:
             activity_detected = True
             reason = "Bewegung erkannt"
             
-        # 2. Smarte Taster / Fernbedienungen (Jeder Klick ist eine bewusste Handlung)
+        # 2. Smarte Taster / Fernbedienungen (Jeder Klick)
         elif "buttonevent" in state:
             activity_detected = True
             reason = f"Schalter betätigt ({state['buttonevent']})"
             
-        # 3. Tür- und Fensterkontakte (Jeder Statuswechsel offen/zu ist eine Aktivität)
+        # 3. Tür- und Fensterkontakte (Jeder Statuswechsel)
         elif "open" in state:
             status = "offen" if state["open"] else "geschlossen"
             activity_detected = True
             reason = f"Tür/Fenster {status}"
             
-        # 4. Licht/Aktor (Jeder logische Schaltvorgang an/aus via App/Smart-Switch ist Aktivität)
+        # 4. Licht/Aktor SMART geschaltet (App / Zigbee-Taster)
         elif "on" in state:
             status = "an" if state["on"] else "aus"
             activity_detected = True
             reason = f"Licht/Aktor {status}"
+            
+        # 5. Licht PHYSISCH am Wandschalter eingeschaltet (Strom wieder da)
+        elif "reachable" in state and state["reachable"] is True and data.get("r") == "lights":
+            activity_detected = True
+            reason = "Licht physisch eingeschaltet (Strom wieder da)"
 
-        # Nur speichern, wenn exakt eines dieser 4 Events zutrifft
+        # Nur speichern, wenn exakt eines dieser Events zutrifft
         if activity_detected:
             update_state_activity(f"{reason} (ID {data.get('id')})")
 
