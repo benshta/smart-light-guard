@@ -1,7 +1,7 @@
 import json, uuid, requests, time, os, threading
 import websocket
 from datetime import datetime, timezone
-from slg_logger import get_logger
+from logger import get_logger
 
 logger = get_logger("MONITOR")
 SETTINGS_FILE = "/opt/smart-light-guard/settings.json"

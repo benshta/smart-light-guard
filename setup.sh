@@ -20,7 +20,7 @@ CODENAME=$(lsb_release -cs)
 echo "deb [signed-by=/usr/share/keyrings/deconz-archive-keyring.gpg] http://phoscon.de/apt/deconz $CODENAME main" | tee /etc/apt/sources.list.d/deconz.list
 
 apt update
-apt install -y deconz-headless python3-websocket python3-requests python3-flask
+apt install -y deconz-headless python3-websocket python3-requests nmap
 
 APP_DIR="/opt/smart-light-guard"
 GIT_REPO="https://github.com/benshta/smart-light-guard.git"
@@ -36,7 +36,7 @@ fi
 MAIN_USER="benji"
 chown -R $MAIN_USER:$MAIN_USER $APP_DIR
 chmod -R 775 $APP_DIR
-chmod +x $APP_DIR/*.py
+chmod +x $APP_DIR/src/*.py
 
 # Hardware-Fixes für RaspBee II
 CONFIG_FILE="/boot/firmware/config.txt"
@@ -55,26 +55,31 @@ ExecStart=/usr/bin/deCONZ -platform offscreen --http-port=8080 --ws-port=8088 --
 EOF
 
 create_slg_service() {
+    PRE_EXEC=""
+    if [ ! -z "$4" ]; then
+        PRE_EXEC="ExecStartPre=/usr/bin/python3 $APP_DIR/src/$4"
+    fi
     cat <<EOF > /etc/systemd/system/$1.service
 [Unit]
 Description=$2
 After=network.target deconz.service
 [Service]
 User=root
-WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/python3 $APP_DIR/$3
+WorkingDirectory=$APP_DIR/src
+$PRE_EXEC
+ExecStart=/usr/bin/python3 $APP_DIR/src/$3
 Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
 }
 
-create_slg_service "slg-dashboard" "SLG Dashboard" "1_dashboard.py"
-create_slg_service "slg-monitor" "SLG Monitor" "2_monitor.py"
-create_slg_service "slg-cloud-sync" "SLG Cloud Sync" "3_cloud_sync.py"
+create_slg_service "slg-monitor" "SLG Monitor" "monitor.py" "hardware_check.py"
+create_slg_service "slg-cloud-sync" "SLG Cloud Sync" "cloud_sync.py"
+create_slg_service "slg-network-scanner" "SLG Network Scanner" "network_scanner.py"
 
 systemctl daemon-reload
-systemctl enable deconz slg-dashboard slg-monitor slg-cloud-sync
+systemctl enable deconz slg-monitor slg-cloud-sync slg-network-scanner
 echo "✅ Setup abgeschlossen. Neustart in 5s..."
 sleep 5
 reboot
